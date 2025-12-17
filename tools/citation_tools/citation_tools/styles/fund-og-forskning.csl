@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<style xmlns="http://purl.org/net/xbiblio/csl" class="note" version="1.0">
+  <info>
+    <title>Fund og Forskning (Danish Humanities)</title>
+    <id>http://www.zotero.org/styles/fund-og-forskning</id>
+    <link href="http://www.zotero.org/styles/fund-og-forskning" rel="self"/>
+    <link href="https://tidsskrift.dk/fundogforskning" rel="documentation"/>
+    <author>
+      <name>Henrik Holm Justesen</name>
+    </author>
+    <category citation-format="note"/>
+    <category field="humanities"/>
+    <summary>Danish humanities citation style used by Fund og Forskning journal</summary>
+    <updated>2024-12-14T00:00:00+00:00</updated>
+  </info>
+  
+  <locale xml:lang="da">
+    <terms>
+      <term name="page" form="short">s.</term>
+      <term name="editor" form="short">red.</term>
+    </terms>
+  </locale>
+  
+  <macro name="author">
+    <names variable="author">
+      <name and="symbol" delimiter-precedes-last="never" initialize-with=". "/>
+    </names>
+  </macro>
+  
+  <macro name="editor">
+    <names variable="editor">
+      <name and="symbol" delimiter-precedes-last="never" initialize-with=". "/>
+      <label form="short" prefix=" (" suffix=")"/>
+    </names>
+  </macro>
+  
+  <citation>
+    <layout delimiter="; ">
+      <group delimiter=": ">
+        <text macro="author"/>
+        <choose>
+          <if type="article-journal">
+            <group delimiter=", ">
+              <text variable="title"/>
+              <text variable="container-title" font-style="italic"/>
+              <text variable="volume"/>
+              <date variable="issued">
+                <date-part name="year"/>
+              </date>
+              <group delimiter=" ">
+                <label variable="page" form="short"/>
+                <text variable="page"/>
+              </group>
+            </group>
+          </if>
+          <else-if type="chapter">
+            <group delimiter=", ">
+              <text variable="title"/>
+              <text macro="editor"/>
+              <text variable="container-title" font-style="italic"/>
+              <date variable="issued">
+                <date-part name="year"/>
+              </date>
+              <group delimiter=" ">
+                <label variable="page" form="short"/>
+                <text variable="page"/>
+              </group>
+            </group>
+          </else-if>
+          <else>
+            <group delimiter=", ">
+              <text variable="title" font-style="italic"/>
+              <group delimiter=" ">
+                <text variable="publisher-place"/>
+                <date variable="issued">
+                  <date-part name="year"/>
+                </date>
+              </group>
+              <group delimiter=" ">
+                <label variable="page" form="short"/>
+                <text variable="page"/>
+              </group>
+            </group>
+          </else>
+        </choose>
+      </group>
+      <text value="."/>
+    </layout>
+  </citation>
+  
+  <bibliography>
+    <layout>
+      <group delimiter=": ">
+        <text macro="author"/>
+        <choose>
+          <if type="article-journal">
+            <group delimiter=", ">
+              <text variable="title"/>
+              <text variable="container-title" font-style="italic"/>
+              <group delimiter=":">
+                <text variable="volume"/>
+                <text variable="issue"/>
+              </group>
+              <group delimiter=" ">
+                <text variable="publisher-place"/>
+                <date variable="issued">
+                  <date-part name="year"/>
+                </date>
+              </group>
+              <group delimiter=" ">
+                <label variable="page" form="short"/>
+                <text variable="page"/>
+              </group>
+            </group>
+          </if>
+          <else-if type="chapter">
+            <group delimiter=" – ">
+              <text variable="title"/>
+              <group delimiter=", ">
+                <text macro="editor"/>
+                <text variable="container-title" font-style="italic"/>
+                <date variable="issued">
+                  <date-part name="year"/>
+                </date>
+                <group delimiter=" ">
+                  <label variable="page" form="short"/>
+                  <text variable="page"/>
+                </group>
+              </group>
+            </group>
+          </else-if>
+          <else>
+            <group delimiter=", ">
+              <text variable="title" font-style="italic"/>
+              <group delimiter=" ">
+                <text variable="publisher-place"/>
+                <date variable="issued">
+                  <date-part name="year"/>
+                </date>
+              </group>
+              <group delimiter=" ">
+                <label variable="page" form="short"/>
+                <text variable="page"/>
+              </group>
+            </group>
+          </else>
+        </choose>
+      </group>
+      <text value="."/>
+    </layout>
+  </bibliography>
+</style>

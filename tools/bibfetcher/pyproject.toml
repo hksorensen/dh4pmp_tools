@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bibfetcher"
+version = "0.4.1"
+description = "Fetch bibliographic metadata from DOI, ISBN, arXiv ID, or PDF files"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Henrik Holm Justesen"}
+]
+keywords = ["bibtex", "bibliography", "doi", "arxiv", "crossref", "pdf"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Text Processing :: Markup",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+dependencies = [
+    "bibtexparser>=1.2.0,<2.0",  # Pin to v1
+    "requests>=2.25.0",
+    "PyPDF2>=3.0.0",
+    "pyperclip>=1.8.0",
+]
+
+[project.optional-dependencies]
+preview = [
+    "pyobjc-framework-Cocoa>=8.0",  # macOS Preview integration
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=3.0",
+    "black>=22.0",
+    "ruff>=0.0.200",
+]
+
+[project.scripts]
+bibfetch = "bibfetcher.cli:main"
+
+[tool.setuptools]
+packages = ["bibfetcher", "bibfetcher.fetchers", "bibfetcher.utils", "bibfetcher.pdf"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
