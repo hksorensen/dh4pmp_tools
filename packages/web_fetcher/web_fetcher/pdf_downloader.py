@@ -30,6 +30,9 @@ except ImportError:
     SELENIUM_AVAILABLE = False
     SeleniumWebFetcher = None
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 class PDFDownloadError(Exception):
     """Base exception for PDF download errors."""
@@ -154,6 +157,8 @@ class PDFDownloader:
                 "Install with: pip install selenium"
             )
         
+        assert SeleniumWebFetcher is not None, "SeleniumWebFetcher is not imported"
+        
         self.pdf_dir = Path(pdf_dir)
         self.cache_dir = Path(cache_dir)
         self.metadata_tracking = metadata_tracking
@@ -172,21 +177,33 @@ class PDFDownloader:
     
     def _get_fetcher(self) -> SeleniumWebFetcher:
         """Get or create a SeleniumWebFetcher instance."""
-        if self._fetcher is None:
-            self._fetcher = SeleniumWebFetcher(
-                cache_dir=str(self.cache_dir),
-                max_retries=self.max_retries,
-                backoff_factor=self.backoff_factor,
-                headless=self.headless,
-                timeout=self.timeout,
-                user_agent=self.user_agent,
-            )
-        return self._fetcher
+        try:
+            if self._fetcher is None:
+                assert SeleniumWebFetcher is not None, "SeleniumWebFetcher is not imported"
+                self._fetcher = SeleniumWebFetcher(
+                    cache_dir=str(self.cache_dir),
+                    max_retries=self.max_retries,
+                    backoff_factor=self.backoff_factor,
+                    headless=self.headless,
+                    timeout=self.timeout,
+                    user_agent=self.user_agent,
+                    use_selenium=True,  # PDFDownloader always needs Selenium
+                )
+                # Initialize driver immediately since we need it for driver.current_url, etc.
+                if not self._fetcher._driver_initialized:
+                    self._fetcher._init_driver()
+        except Exception as e:
+            logger.error(f"Error creating fetcher: {e}")
+            raise
+        finally:
+            assert self._fetcher is not None, "Fetcher is None"
+            assert self._fetcher.driver is not None, "Driver is None"
+            return self._fetcher
     
     def close(self):
         """Close the browser and cleanup resources."""
         if self._fetcher is not None:
-            self._fetcher.close()
+            self._fetcher.close_driver()
             self._fetcher = None
     
     def __enter__(self):
@@ -241,7 +258,7 @@ class PDFDownloader:
             Publisher landing page URL
         """
         # Clean DOI
-        doi = self.sanitize_doi(doi)
+        # doi = self.sanitize_doi(doi)
         
         # Use dx.doi.org for resolution
         return f"https://doi.org/{doi}"
@@ -341,6 +358,8 @@ class PDFDownloader:
         
         # Look for PDF buttons
         if not pdf_url:
+            logger.info(f"No PDF link found, looking for buttons")
+            logger.info(f"{driver is None}: Driver is None")
             try:
                 buttons = driver.find_elements(
                     By.CSS_SELECTOR,
@@ -505,10 +524,11 @@ class PDFDownloader:
         try:
             # Resolve DOI
             doi_url = self._resolve_doi(doi)
+            logging.info(f"Resolved DOI to: {doi_url}")
             fetcher = self._get_fetcher()
             
-            # Navigate to landing page
-            page_result = fetcher.fetch(doi_url)
+            # Navigate to landing page (use_selenium=True to ensure Selenium is used)
+            page_result = fetcher.fetch(doi_url, use_selenium=True)
             
             if page_result['status_code'] != 200:
                 raise PDFDownloadError(
@@ -516,6 +536,7 @@ class PDFDownloader:
                 )
             
             landing_url = fetcher.driver.current_url
+            logger.info(f"Landing URL: {landing_url}")
             result['url'] = landing_url
             
             # Check for paywall
