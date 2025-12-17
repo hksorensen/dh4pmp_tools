@@ -11,13 +11,13 @@ long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists
 
 setup(
     name="web_fetcher",
-    version="0.2.0",
+    version="0.1.0",
     author="Henrik Sørensen",
     author_email="your.email@example.com",  # Update this
-    description="Web page fetcher with caching, retry logic, Selenium support, and PDF downloading from DOIs",
+    description="Web page fetcher with caching, retry logic, and Selenium support",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/hksorensen/dh4pmp_tools",
+    url="https://github.com/hksorensen/web_fetcher",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",

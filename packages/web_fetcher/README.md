@@ -1,16 +1,22 @@
-# Web Page Fetcher
+# Web Fetcher
 
 A robust web page fetching library with local file-based caching, retry logic, and optional Selenium support for JavaScript-heavy pages and CAPTCHA handling.
+
+**New in 0.2.0**: `PDFDownloader` class for downloading PDFs from DOIs with intelligent publisher navigation.
 
 ## Features
 
 - **Local file-based caching**: Efficient caching using MD5-keyed JSON files
 - **Automatic retry logic**: Configurable retries with exponential backoff
-- **Two implementations**:
+- **Three implementations**:
   - `WebPageFetcher`: Lightweight requests-based fetcher
   - `SeleniumWebFetcher`: Extended version with Selenium support
+  - `PDFDownloader`: Specialized DOI → PDF downloader (new!)
 - **PDF downloading**: Intelligent PDF detection and download with CloudFlare support
-- **CAPTCHA handling**: Manual and automated CAPTCHA solving capabilities
+- **Publisher awareness**: Built-in patterns for major academic publishers
+- **Paywall detection**: Graceful handling of restricted content
+- **Batch processing**: Download multiple PDFs with progress tracking
+- **Metadata tracking**: JSON sidecar files for download status
 - **Rate limiting**: Built-in delays for batch fetching
 - **Context manager support**: Clean resource management
 
@@ -22,7 +28,7 @@ A robust web page fetching library with local file-based caching, retry logic, a
 pip install requests urllib3
 ```
 
-### With Selenium support
+### With Selenium support (required for PDFDownloader)
 
 ```bash
 pip install requests urllib3 selenium
@@ -54,6 +60,115 @@ brew install geckodriver
 
 ## Usage
 
+### NEW: PDF Downloader (0.2.0)
+
+Download PDFs directly from DOIs with intelligent navigation:
+
+```python
+from web_fetcher import PDFDownloader
+
+# Create downloader instance
+downloader = PDFDownloader(
+    pdf_dir="./pdfs",
+    cache_dir="./cache",
+    max_retries=3,
+    headless=True
+)
+
+# Download single PDF
+result = downloader.download_from_doi("10.1038/s41586-024-07998-6")
+
+if result['success']:
+    print(f"Downloaded to: {result['pdf_path']}")
+else:
+    print(f"Failed: {result['error']}")
+    print(f"Status: {result['status']}")  # 'failure' or 'paywall'
+```
+
+**Batch downloading with progress:**
+
+```python
+dois = [
+    "10.1038/s41586-024-07998-6",
+    "10.1016/j.neuron.2024.01.015",
+    "10.1371/journal.pone.0033693",
+    # ... more DOIs
+]
+
+results = downloader.download_batch(
+    dois,
+    delay=2.0,  # 2 seconds between requests
+    progress=True
+)
+
+# Check results
+for result in results:
+    if result['success']:
+        print(f"✓ {result['doi']}")
+    elif result['status'] == 'paywall':
+        print(f"⚠ {result['doi']} - Paywall")
+    else:
+        print(f"✗ {result['doi']} - {result['error']}")
+```
+
+**Get statistics:**
+
+```python
+stats = downloader.get_statistics()
+print(f"Downloaded: {stats['success']} PDFs")
+print(f"Failed: {stats['failure']}")
+print(f"Paywalled: {stats['paywall']}")
+print(f"Total size: {stats['total_size_mb']:.1f} MB")
+```
+
+**List downloaded files:**
+
+```python
+downloaded = downloader.list_downloaded()
+for item in downloaded:
+    print(f"{item['doi']}: {item['pdf_path']}")
+```
+
+**Using context manager:**
+
+```python
+with PDFDownloader(pdf_dir="./pdfs") as downloader:
+    result = downloader.download_from_doi("10.1038/...")
+    # Browser automatically closed
+```
+
+#### PDF Download Features
+
+- **Publisher awareness**: Recognizes Nature, Elsevier, Springer, Wiley, arXiv, PLoS patterns
+- **Paywall detection**: Identifies paywalled content and reports gracefully
+- **Cloudflare handling**: Automatically handles Cloudflare challenges
+- **Resume capability**: Skips already downloaded PDFs (unless `force_refresh=True`)
+- **Metadata tracking**: Creates `.json` files with download status, timestamps, URLs
+- **Error handling**: Distinguishes between failures, paywalls, and missing PDFs
+
+#### File Organization
+
+PDFs are organized with metadata:
+
+```
+pdfs/
+├── 10.1038_s41586-024-07998-6.pdf
+├── 10.1038_s41586-024-07998-6.json
+├── 10.1016_j.neuron-2024-01-015.pdf
+└── 10.1016_j.neuron-2024-01-015.json
+```
+
+Metadata JSON contains:
+```json
+{
+  "doi": "10.1038/s41586-024-07998-6",
+  "status": "success",
+  "timestamp": "2024-12-17T14:30:00",
+  "url": "https://www.nature.com/articles/...",
+  "pdf_path": "/path/to/pdfs/10.1038_s41586-024-07998-6.pdf"
+}
+```
+
 ### Basic Usage with WebPageFetcher
 
 ```python
@@ -83,6 +198,40 @@ urls = ["https://example.com", "https://python.org"]
 results = fetcher.fetch_multiple(urls, delay=1.0)
 ```
 
+### Using SeleniumWebFetcher
+
+For JavaScript-heavy pages or button clicking:
+
+```python
+from web_fetcher import SeleniumWebFetcher, By
+
+# Create Selenium fetcher
+fetcher = SeleniumWebFetcher(
+    cache_dir="./cache",
+    headless=True,
+    timeout=30
+)
+
+# Fetch page
+result = fetcher.fetch("https://example.com")
+
+# Click a button
+button = fetcher.driver.find_element(By.CSS_SELECTOR, ".download-button")
+button.click()
+
+# Wait for element
+fetcher.wait_for_element(By.ID, "content", timeout=10)
+
+# Handle CAPTCHA manually
+result = fetcher.fetch_with_captcha_handling(
+    "https://example.com",
+    captcha_present=lambda d: "captcha" in d.page_source.lower()
+)
+
+# Close when done
+fetcher.close()
+```
+
 ### Using Context Manager
 
 ```python
@@ -101,325 +250,12 @@ result = fetcher.fetch("https://example.com")
 # Custom headers
 result = fetcher.fetch(
     "https://example.com",
-    headers={'Authorization': 'Bearer token123'}
+    headers={'Authorization': 'Bearer token'}
 )
 
-# POST requests
-result = fetcher.fetch(
-    "https://api.example.com/submit",
-    method="POST",
-    data={'key': 'value'}
-)
-
-# Clear cache
-fetcher.clear_cache()  # Clear all
-fetcher.clear_cache(url="https://example.com")  # Clear specific URL
-```
-
-### Using Selenium for JavaScript Rendering
-
-```python
-from selenium_web_fetcher import SeleniumWebFetcher
-from selenium.webdriver.common.by import By
-
-# Create Selenium-enabled fetcher
-fetcher = SeleniumWebFetcher(
-    cache_dir="./cache/selenium",
-    use_selenium=True,
-    headless=True,
-)
-
-# Basic fetch with Selenium
-result = fetcher.fetch("https://example.com")
-
-# Wait for specific element before capturing
-result = fetcher.fetch(
-    "https://dynamic-site.com",
-    wait_for_element=(By.ID, "content")
-)
-
-# Execute JavaScript after page load
-result = fetcher.fetch(
-    "https://example.com",
-    execute_script="window.scrollTo(0, document.body.scrollHeight);"
-)
-
-# Automatically accept cookies if present
-result = fetcher.fetch(
-    "https://example.com",
-    cookie_accept_selector=(By.ID, "accept-cookies")  # or By.CLASS_NAME, By.XPATH, etc.
-)
-
-# Don't forget to close the driver
-fetcher.close_driver()
-```
-
-### Mixed Usage (Requests + Selenium)
-
-```python
-# Use requests by default, Selenium when needed
-with SeleniumWebFetcher(use_selenium=False) as fetcher:
-    # This uses requests (fast)
-    result1 = fetcher.fetch("https://simple-page.com")
-    
-    # This uses Selenium (slower but handles JS)
-    result2 = fetcher.fetch(
-        "https://javascript-heavy-page.com",
-        use_selenium=True,
-        wait_for_element=(By.CLASS_NAME, "dynamic-content"),
-        cookie_accept_selector=(By.CLASS_NAME, "cookie-accept")  # Auto-accept cookies
-    )
-```
-
-### Lazy Initialization (Using Utility Methods Without Browser)
-
-The browser only opens when you actually need Selenium. You can use utility methods like `get_cache_filename` without browser overhead:
-
-```python
-# Create fetcher - browser does NOT open yet
-fetcher = SeleniumWebFetcher(
-    use_selenium=True,
-    headless=True,
-    cache_dir="./cache"
-)
-
-# Use utility methods without opening browser
-url = "https://example.com"
-
-# Check if cached
-cache_file = fetcher.get_cache_filename(url)
-if cache_file:
-    print(f"Found: {cache_file}")
-
-# Get cache information
-has_cache = fetcher.has_cache(url)
-cache_key = fetcher._get_cache_key(url)
-
-# Browser only opens when you actually fetch
-response = fetcher.fetch(url, use_selenium=True)  # Browser opens here
-
-fetcher.close()
-```
-
-This is useful when you want to check cache status or manage cache files without the overhead of launching a browser.
-
-### Eliminating Delays for Cache Operations
-
-The fetcher includes several configurable delays for page loading. For cache-only operations, you can eliminate all delays:
-
-```python
-# Zero delays - instant cache operations
-fetcher = SeleniumWebFetcher(
-    use_selenium=True,
-    headless=True,
-    page_load_wait=0.0,     # No wait after page load (default: 2.0)
-    wait_timeout=1,         # Minimal timeout (default: 10)
-    random_wait_min=0.0,    # No random delays (default: 0.0)
-    random_wait_max=0.0     # No random delays (default: 0.0)
-)
-
-# Cache operations are instant regardless of configuration
-cache_file = fetcher.get_cache_filename(url)  # Instant
-has_cache = fetcher.has_cache(url)            # Instant
-```
-
-**Delay parameters:**
-- `page_load_wait`: Time to wait after page loads (for JS rendering)
-- `wait_timeout`: Max time to wait for specific elements
-- `random_wait_min/max`: Random delay between requests (for rate limiting)
-
-**When to use different configurations:**
-- **Cache operations only**: `page_load_wait=0.0, wait_timeout=1`
-- **Simple pages**: `page_load_wait=0.5, wait_timeout=5`  
-- **Standard sites** (default): `page_load_wait=2.0, wait_timeout=10`
-- **Heavy JS sites**: `page_load_wait=3.0, wait_timeout=15`
-- **Avoid rate limits**: Set `random_wait_max=3.0` for 0-3s random delays
-
-See `examples/minimal_delays.py` for detailed configuration examples.
-
-### Cookie Acceptance
-
-For websites that show cookie consent banners, you can automatically accept cookies:
-
-```python
-from selenium.webdriver.common.by import By
-
-fetcher = SeleniumWebFetcher(
-    use_selenium=True,
-    headless=True,
-)
-
-# Automatically click cookie accept button if present
-result = fetcher.fetch(
-    "https://example.com",
-    cookie_accept_selector=(By.ID, "accept-cookies")
-)
-
-# The fetcher will:
-# 1. Load the page
-# 2. Check if the cookie button exists
-# 3. Click it if found
-# 4. Wait for the page to reload
-# 5. Return the final page content
-```
-
-You can use any Selenium `By` locator:
-- `By.ID` - for element IDs
-- `By.CLASS_NAME` - for CSS classes
-- `By.XPATH` - for XPath expressions
-- `By.CSS_SELECTOR` - for CSS selectors
-- `By.TAG_NAME` - for HTML tag names
-
-**Note:** The cookie accept button is only clicked if it's present. If the button doesn't exist, the fetcher will continue normally without error.
-
-### PDF Downloading
-
-The `SeleniumWebFetcher` includes intelligent PDF downloading that handles:
-- Direct PDF URLs
-- Pages with PDF download links/buttons
-- CloudFlare challenges
-- Cookie acceptance
-
-The download process follows a 3-step approach:
-1. Check if the page itself is a PDF file → download it
-2. If not, search for PDF links/buttons (with text like "DOI", "Download", "PDF") → click and go to step 1
-3. If neither works, report failure and continue
-
-```python
-from pathlib import Path
-from selenium.webdriver.common.by import By
-
-with SeleniumWebFetcher(
-    use_selenium=True,
-    headless=True,
-    use_undetected=True,  # Helps bypass bot detection
-    random_wait_min=2.0,  # Wait between requests to avoid rate limiting
-    random_wait_max=5.0,
-) as fetcher:
-    
-    # Example 1: Direct PDF URL
-    pdf_path = fetcher.download_pdf(
-        url="https://example.com/document.pdf",
-        output_path=Path("./downloads/document.pdf")
-    )
-    if pdf_path:
-        print(f"✓ Downloaded: {pdf_path}")
-    
-    # Example 2: Page with PDF download link
-    pdf_path = fetcher.download_pdf(
-        url="https://example.com/article",
-        output_path=Path("./downloads/article.pdf"),
-        cookie_accept_selector=(By.ID, "accept-cookies"),  # Auto-accept cookies
-    )
-    
-    # Example 3: Science.org article (handles CloudFlare automatically)
-    pdf_path = fetcher.download_pdf(
-        url="https://www.science.org/doi/10.1126/science.abc123",
-        output_path=Path("./downloads/science_article.pdf"),
-        cookie_accept_selector=(By.CLASS_NAME, "osano-cm-acceptAll"),
-    )
-```
-
-**PDF Detection:**
-- Automatically detects if current page is a PDF (by content-type, URL, or content)
-- Searches for PDF links by text keywords: "DOI", "Download", "PDF", "Full Text", etc.
-- Searches for PDF links by URL patterns: `.pdf` extension, `/pdf` path, `format=pdf` parameter
-
-**CloudFlare Handling:**
-- Automatically waits for CloudFlare challenges to complete
-- Falls back to manual intervention if automatic wait times out
-- Handles rate limiting gracefully with informative error messages
-
-**Cookie Acceptance:**
-- Automatically clicks cookie accept buttons if selector is provided
-- Handles cookies on both initial page and PDF link pages
-
-### Manual CAPTCHA Solving
-
-For pages with CAPTCHAs, you can use manual solving:
-
-```python
-fetcher = SeleniumWebFetcher(
-    use_selenium=True,
-    headless=False,  # Must be visible for manual solving
-)
-
-# Opens browser window and waits for you to solve CAPTCHA
-result = fetcher.handle_captcha_manual(
-    "https://site-with-captcha.com",
-    timeout=120  # Wait up to 2 minutes
-)
-
-# Press Enter in terminal when done, or script continues after timeout
-```
-
-## Configuration
-
-### WebPageFetcher Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `cache_dir` | str/Path | `"./cache/web_pages"` | Directory for cache files |
-| `max_retries` | int | `3` | Maximum retry attempts |
-| `backoff_factor` | float | `1.0` | Exponential backoff multiplier |
-| `timeout` | int/tuple | `(10, 30)` | Request timeout (connect, read) |
-| `user_agent` | str | Chrome UA | User agent string |
-| `force_refresh` | bool | `False` | Always bypass cache |
-
-### SeleniumWebFetcher Additional Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `use_selenium` | bool | `False` | Use Selenium by default |
-| `headless` | bool | `True` | Run browser in headless mode |
-| `browser` | str | `'chrome'` | Browser to use ('chrome' or 'firefox') |
-| `executable_path` | str/Path | `None` | Path to browser driver |
-| `wait_timeout` | int | `10` | Element wait timeout (seconds) |
-| `page_load_wait` | float | `2.0` | Wait after page load (seconds) |
-
-## Response Format
-
-Both fetchers return a dictionary with:
-
-```python
-{
-    'url': str,              # Final URL (after redirects)
-    'status_code': int,      # HTTP status code
-    'content': str,          # Page content
-    'headers': dict,         # Response headers
-    'encoding': str,         # Content encoding
-    'cached': bool,          # Whether from cache
-    'timestamp': float,      # Unix timestamp
-    'fetched_with_selenium': bool,  # (Selenium only)
-}
-```
-
-## Cache Structure
-
-Cache files are stored in subdirectories based on MD5 hash:
-
-```
-cache_dir/
-├── 00/
-│   ├── 00a1b2c3d4e5f6g7h8i9j0k1l2m3n4.json
-│   └── 00f9e8d7c6b5a4938271605948372615.json
-├── 01/
-│   └── ...
-└── ff/
-    └── ...
-```
-
-## Error Handling
-
-The fetchers use Python's built-in retry mechanisms and raise `requests.RequestException` on failure:
-
-```python
-from requests.exceptions import RequestException
-
-try:
-    result = fetcher.fetch("https://example.com")
-except RequestException as e:
-    print(f"Failed to fetch: {e}")
+# Custom timeout
+fetcher = WebPageFetcher(timeout=60)
+result = fetcher.fetch("https://slow-site.com")
 ```
 
 ## Integration with Existing Projects
@@ -434,27 +270,26 @@ This library is designed to work alongside the `api_clients` package and follows
 ### Example: Using with api_clients
 
 ```python
-from api_clients import ScopusClient, CrossrefClient
-from web_fetcher import WebPageFetcher
+from api_clients import CrossrefClient
+from web_fetcher import PDFDownloader
 
-# Use API clients for structured data
-scopus = ScopusClient(api_key="your_key")
+# Get DOIs from Crossref
 crossref = CrossrefClient()
+results = crossref.fetch("machine learning", rows=100)
 
-# Use web fetcher for scraping journal websites
-web_fetcher = WebPageFetcher(cache_dir="./cache/web")
+# Extract DOIs
+dois = [item['DOI'] for item in results['items'] if 'DOI' in item]
 
-# Get metadata from API
-paper_metadata = scopus.get_abstract("SCOPUS_ID:12345")
+# Download PDFs
+downloader = PDFDownloader(pdf_dir="./ml_papers")
+pdf_results = downloader.download_batch(dois, delay=2.0)
 
-# Fetch full text from publisher website
-if 'link' in paper_metadata:
-    webpage = web_fetcher.fetch(paper_metadata['link'])
+print(f"Downloaded {sum(1 for r in pdf_results if r['success'])} PDFs")
 ```
 
 ## Logging
 
-Both classes use Python's `logging` module:
+All classes use Python's `logging` module:
 
 ```python
 import logging
@@ -466,26 +301,73 @@ logging.basicConfig(
 )
 
 # Now fetcher operations will log
-fetcher = WebPageFetcher()
-result = fetcher.fetch("https://example.com")
+downloader = PDFDownloader()
+result = downloader.download_from_doi("10.1038/...")
 ```
 
 ## Performance Considerations
 
 - **Requests mode**: Very fast, ideal for simple HTML pages
 - **Selenium mode**: Slower due to browser overhead, use only when necessary
+- **PDF downloading**: Varies by publisher; expect 2-5 seconds per PDF
 - **Caching**: First request is slow, subsequent requests are instant
-- **Batch fetching**: Use `fetch_multiple()` with appropriate delays to avoid rate limiting
+- **Batch fetching**: Use appropriate delays (2-3 seconds) to avoid rate limiting
+- **Large batches**: For 50,000+ PDFs, consider sampling or batch archiving
+
+## Scaling to Large Downloads
+
+For large-scale PDF downloading (10,000+ files):
+
+1. **Sampling**: Process a representative subset
+2. **Batch checkpointing**: Download in chunks and archive
+3. **Resume capability**: Built-in skip of existing files
+4. **Progress tracking**: Monitor success/failure rates
+5. **External storage**: Move completed batches to SFTP/cloud storage
+
+Example for large-scale downloads:
+
+```python
+# Download in batches of 1000
+batch_size = 1000
+all_dois = [...50000 DOIs...]
+
+for i in range(0, len(all_dois), batch_size):
+    batch = all_dois[i:i+batch_size]
+    
+    downloader = PDFDownloader(pdf_dir=f"./pdfs/batch_{i//batch_size}")
+    results = downloader.download_batch(batch, delay=2.0)
+    
+    # Archive batch before next one
+    # tar -czf batch_N.tar.gz ./pdfs/batch_N
+    # scp batch_N.tar.gz remote_server:/storage/
+```
 
 ## Tips
 
 1. Start with `WebPageFetcher` for most use cases
 2. Use `SeleniumWebFetcher` only for JavaScript-heavy sites
-3. Set `headless=True` for production, `headless=False` for debugging
-4. Cache directory grows over time - implement periodic cleanup if needed
-5. For CAPTCHA-protected sites, consider using manual solving mode
-6. Always use context managers or explicitly close drivers/sessions
+3. Use `PDFDownloader` specifically for DOI → PDF workflows
+4. Set `headless=True` for production, `headless=False` for debugging
+5. Cache directory grows over time - implement periodic cleanup if needed
+6. For CAPTCHA-protected sites, consider using manual solving mode
+7. Always use context managers or explicitly close drivers/sessions
+8. Monitor paywall rates to understand access limitations
+
+## Error Handling
+
+PDFDownloader distinguishes between different failure types:
+
+```python
+result = downloader.download_from_doi("10.1038/...")
+
+if result['success']:
+    print("Downloaded successfully")
+elif result['status'] == 'paywall':
+    print("Content is behind paywall")
+elif result['status'] == 'failure':
+    print(f"Download failed: {result['error']}")
+```
 
 ## License
 
-This code is part of the sciec research project and follows the same license.
+This code is part of the dh4pmp_tools project and follows the MIT license.
