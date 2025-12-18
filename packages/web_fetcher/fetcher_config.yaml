@@ -1,4 +1,4 @@
-# PDF Fetcher v2 Configuration File
+# PDF Fetcher v1.0 Configuration
 # Save as: fetcher_config.yaml
 
 # ============================================================================
@@ -6,16 +6,15 @@
 # ============================================================================
 
 # Where to save downloaded PDFs
-pdf_dir: "./pdfs"
+pdf_dir: ./pdfs
 
 # Where to save log files (if null, uses pdf_dir)
-log_dir: "./logs"
+log_dir: ./logs
 
 # Metadata filename (relative to pdf_dir)
-metadata_filename: "metadata.json"
+metadata_filename: metadata.json
 
 # Selenium download directory (if null, uses temp directory)
-# Set this if you want persistent Selenium downloads
 selenium_download_dir: null
 
 # ============================================================================
@@ -79,16 +78,18 @@ use_crossref: true
 # ============================================================================
 
 # CONSERVATIVE (for avoiding Cloudflare)
+# Uncomment to use:
 # requests_per_second: 0.5
 # delay_between_requests: 3.0
 # delay_between_batches: 30.0
 
-# BALANCED (default)
+# BALANCED (default - shown above)
 # requests_per_second: 1.0
 # delay_between_requests: 2.0
 # delay_between_batches: 10.0
 
 # AGGRESSIVE (fast, may trigger Cloudflare)
+# Uncomment to use:
 # requests_per_second: 2.0
 # delay_between_requests: 1.0
 # delay_between_batches: 5.0

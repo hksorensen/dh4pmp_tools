@@ -1,11 +1,22 @@
-"""Version information for PDF Fetcher v2."""
+"""Version information for PDF Fetcher."""
 
-__version__ = "0.3.0"
+__version__ = "1.0.0"
 __author__ = "Henrik Kragh Sørensen"
 __description__ = "PDF fetcher with DOI resolution, publisher detection, and Cloudflare handling"
 
 # Version history
 CHANGELOG = """
+1.0.0 (2024-12-18)
+------------------
+Major release with complete configuration system integration
+
+- YAML-only configuration (single source of truth)
+- Fully integrated config system into PDFFetcher
+- Configurable PDF and log directories
+- Structured logging with download summaries
+- Improved Cloudflare handling options
+- Production-ready stability
+
 0.3.0 (2024-12-18)
 ------------------
 - Added configuration file support (YAML/JSON)

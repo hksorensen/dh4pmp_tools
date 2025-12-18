@@ -1223,57 +1223,78 @@ class PDFFetcher:
     
     def __init__(
         self,
-        pdf_dir: Union[str, Path] = "./pdfs",
-        metadata_path: Union[str, Path] = "./pdfs/metadata.json",
-        headless: bool = True,
-        requests_per_second: float = 1.0,
-        max_retries: int = 3,
-        user_agent: Optional[str] = None,
-        selenium_download_dir: Optional[Union[str, Path]] = None,
-        delay_between_requests: float = 2.0,
-        delay_between_batches: float = 10.0
+        config: Optional[PDFFetcherConfig] = None,
+        config_file: Optional[Union[str, Path]] = None,
+        **kwargs
     ):
         """
         Initialize PDF fetcher.
         
         Args:
-            pdf_dir: Directory to store PDFs
-            metadata_path: Path to metadata JSON file
-            headless: Run browser in headless mode
-            requests_per_second: Rate limit per domain
-            max_retries: Max retry attempts for network errors
-            user_agent: Custom user agent string
-            selenium_download_dir: Directory for Selenium browser downloads (defaults to temp dir)
-            delay_between_requests: Delay in seconds between individual requests (helps avoid Cloudflare)
-            delay_between_batches: Delay in seconds between batches (for batch processing)
+            config: PDFFetcherConfig object (highest priority)
+            config_file: Path to YAML config file  
+            **kwargs: Override parameters (e.g., pdf_dir="./pdfs")
+        
+        Priority: config object > config_file > kwargs > defaults
+        
+        Examples:
+            # Use config file
+            fetcher = PDFFetcher(config_file="fetcher_config.yaml")
+            
+            # Use config file with overrides
+            fetcher = PDFFetcher(config_file="config.yaml", headless=False)
+            
+            # Use parameters (old way - still works!)
+            fetcher = PDFFetcher(pdf_dir="./pdfs", headless=True)
+            
+            # Use config object
+            config = PDFFetcherConfig(pdf_dir="./pdfs", log_dir="./logs")
+            fetcher = PDFFetcher(config=config)
         """
-        self.pdf_dir = Path(pdf_dir)
+        # Load configuration with priority: config > config_file > kwargs
+        if config is None:
+            config = load_config(config_file=config_file, **kwargs)
+        
+        self.config = config
+        
+        # Setup logging
+        self.logger = setup_logging(
+            log_file=config.log_file_path,
+            console_level=logging.INFO,
+            file_level=logging.DEBUG
+        )
+        self.logger.info(f"PDF Fetcher v{__version__} initialized")
+        self.logger.info(f"PDF directory: {config.pdf_dir}")
+        self.logger.info(f"Log directory: {config.log_dir}")
+        
+        # Use config values
+        self.pdf_dir = Path(config.pdf_dir)
         self.pdf_dir.mkdir(parents=True, exist_ok=True)
         
-        self.metadata_path = Path(metadata_path)
+        self.metadata_path = config.metadata_path
         self.metadata_store = MetadataStore(self.metadata_path)
         
-        self.headless = headless
-        self.max_retries = max_retries
-        self.rate_limiter = RateLimiter(requests_per_second)
-        self.delay_between_requests = delay_between_requests
-        self.delay_between_batches = delay_between_batches
+        self.headless = config.headless
+        self.max_retries = config.max_retries
+        self.rate_limiter = RateLimiter(config.requests_per_second)
+        self.delay_between_requests = config.delay_between_requests
+        self.delay_between_batches = config.delay_between_batches
         
         # Setup Selenium download directory
-        if selenium_download_dir:
-            self.selenium_download_dir = Path(selenium_download_dir).resolve()
+        if config.selenium_download_dir:
+            self.selenium_download_dir = Path(config.selenium_download_dir).resolve()
             self._selenium_download_dir_is_temp = False
         else:
             # Use a temp directory for Selenium downloads
             self.selenium_download_dir = Path(tempfile.mkdtemp(prefix='selenium_downloads_')).resolve()
             self._selenium_download_dir_is_temp = True
         self.selenium_download_dir.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Selenium download directory: {self.selenium_download_dir} (temp: {self._selenium_download_dir_is_temp})")
+        self.logger.debug(f"Selenium download directory: {self.selenium_download_dir} (temp: {self._selenium_download_dir_is_temp})")
         
         # Setup requests session
         self.session = requests.Session()
-        if user_agent:
-            self.user_agent = user_agent
+        if config.user_agent:
+            self.user_agent = config.user_agent
         else:
             self.user_agent = (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -1292,7 +1313,7 @@ class PDFFetcher:
         
         # Setup retry strategy with enhanced connection pooling
         retry_strategy = Retry(
-            total=max_retries,
+            total=config.max_retries,
             backoff_factor=1,
             status_forcelist=[500, 502, 503, 504]
         )
@@ -1315,12 +1336,12 @@ class PDFFetcher:
         
         # Optional Crossref support (for direct PDF URL lookup)
         self.crossref_fetcher = None
-        if CROSSREF_AVAILABLE:
+        if CROSSREF_AVAILABLE and config.use_crossref:
             try:
                 self.crossref_fetcher = CrossrefBibliographicFetcher()
-                logger.info("Crossref support enabled - will try Crossref for PDF URLs first")
+                self.logger.info("Crossref support enabled - will try Crossref for PDF URLs first")
             except Exception as e:
-                logger.warning(f"Could not initialize Crossref fetcher: {e} - will skip Crossref lookup")
+                self.logger.warning(f"Could not initialize Crossref fetcher: {e} - will skip Crossref lookup")
                 self.crossref_fetcher = None
     
     def _get_driver(self, domain: Optional[str] = None) -> webdriver.Chrome:

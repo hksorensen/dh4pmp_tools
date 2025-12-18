@@ -1,13 +1,9 @@
 """
-Configuration management for PDF Fetcher v2.
+Configuration management for PDF Fetcher.
 
-Supports configuration via:
-1. Constructor parameters (highest priority)
-2. Config file (YAML or JSON)
-3. Defaults (lowest priority)
+YAML-only configuration for single source of truth.
 """
 
-import json
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
 from dataclasses import dataclass, field, asdict
@@ -17,6 +13,10 @@ try:
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
+    raise ImportError(
+        "PyYAML is required for PDF Fetcher configuration. "
+        "Install with: pip install pyyaml"
+    )
 
 
 @dataclass
@@ -74,35 +74,29 @@ class PDFFetcherConfig:
         """Convert to dictionary."""
         return asdict(self)
     
-    def save(self, path: Union[str, Path], format: str = "yaml"):
+    def save(self, path: Union[str, Path]):
         """
-        Save configuration to file.
+        Save configuration to YAML file.
         
         Args:
-            path: Path to save to
-            format: 'yaml' or 'json'
+            path: Path to save to (should end in .yaml or .yml)
         """
         path = Path(path)
+        if path.suffix not in ['.yaml', '.yml']:
+            raise ValueError(f"Config file must be .yaml or .yml, got: {path.suffix}")
+        
         config_dict = self.to_dict()
         
-        if format == "yaml":
-            if not YAML_AVAILABLE:
-                raise ImportError("PyYAML is required for YAML config files. Install with: pip install pyyaml")
-            with open(path, 'w') as f:
-                yaml.dump(config_dict, f, default_flow_style=False)
-        elif format == "json":
-            with open(path, 'w') as f:
-                json.dump(config_dict, f, indent=2)
-        else:
-            raise ValueError(f"Unsupported format: {format}. Use 'yaml' or 'json'")
+        with open(path, 'w') as f:
+            yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
     
     @classmethod
     def from_file(cls, path: Union[str, Path]) -> 'PDFFetcherConfig':
         """
-        Load configuration from file.
+        Load configuration from YAML file.
         
         Args:
-            path: Path to config file (.yaml, .yml, or .json)
+            path: Path to YAML config file (.yaml or .yml)
         
         Returns:
             PDFFetcherConfig instance
@@ -111,19 +105,15 @@ class PDFFetcherConfig:
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
         
-        # Determine format from extension
-        ext = path.suffix.lower()
+        # Verify it's a YAML file
+        if path.suffix not in ['.yaml', '.yml']:
+            raise ValueError(
+                f"Config file must be .yaml or .yml, got: {path.suffix}\n"
+                f"PDF Fetcher uses YAML as single source of truth."
+            )
         
-        if ext in ('.yaml', '.yml'):
-            if not YAML_AVAILABLE:
-                raise ImportError("PyYAML is required for YAML config files. Install with: pip install pyyaml")
-            with open(path) as f:
-                config_dict = yaml.safe_load(f)
-        elif ext == '.json':
-            with open(path) as f:
-                config_dict = json.load(f)
-        else:
-            raise ValueError(f"Unsupported config file extension: {ext}. Use .yaml, .yml, or .json")
+        with open(path) as f:
+            config_dict = yaml.safe_load(f)
         
         return cls(**config_dict)
     
@@ -141,11 +131,21 @@ def load_config(
     Load configuration with priority: kwargs > config_file > defaults.
     
     Args:
-        config_file: Optional path to config file
+        config_file: Optional path to YAML config file
         **kwargs: Override parameters
     
     Returns:
         PDFFetcherConfig instance
+    
+    Examples:
+        # From file
+        config = load_config("fetcher_config.yaml")
+        
+        # From file with overrides
+        config = load_config("config.yaml", pdf_dir="./test_pdfs")
+        
+        # From parameters only
+        config = load_config(pdf_dir="./pdfs", log_dir="./logs")
     """
     if config_file:
         config = PDFFetcherConfig.from_file(config_file)
@@ -158,51 +158,93 @@ def load_config(
         return PDFFetcherConfig(**{k: v for k, v in kwargs.items() if v is not None})
 
 
-# Example config files for documentation
-EXAMPLE_CONFIG_YAML = """
-# PDF Fetcher v2 Configuration
+# Example config for documentation
+EXAMPLE_CONFIG_YAML = """# PDF Fetcher Configuration
+# Save as: fetcher_config.yaml
 
-# Directory configuration
-pdf_dir: "./pdfs"
-log_dir: "./logs"  # Optional: separate log directory
-metadata_filename: "metadata.json"
-selenium_download_dir: null  # null = use temp directory
+# ============================================================================
+# DIRECTORY CONFIGURATION
+# ============================================================================
 
-# Browser configuration
+# Where to save downloaded PDFs
+pdf_dir: ./pdfs
+
+# Where to save log files (if null, uses pdf_dir)
+log_dir: ./logs
+
+# Metadata filename (relative to pdf_dir)
+metadata_filename: metadata.json
+
+# Selenium download directory (if null, uses temp directory)
+selenium_download_dir: null
+
+# ============================================================================
+# BROWSER CONFIGURATION
+# ============================================================================
+
+# Run browser in headless mode (no visible window)
 headless: true
-user_agent: null  # null = use default Chrome user agent
 
-# Rate limiting (helps avoid Cloudflare triggers)
+# Custom user agent (if null, uses default Chrome user agent)
+user_agent: null
+
+# ============================================================================
+# RATE LIMITING
+# ============================================================================
+# These settings help avoid triggering Cloudflare
+
+# Base rate limit per domain (requests per second)
 requests_per_second: 1.0
+
+# Delay between individual requests (seconds)
 delay_between_requests: 2.0
+
+# Delay between batches (seconds)
 delay_between_batches: 10.0
 
-# Network configuration
+# ============================================================================
+# NETWORK CONFIGURATION
+# ============================================================================
+
+# Maximum retry attempts for network errors
 max_retries: 3
+
+# Request timeout (seconds)
 timeout: 30
 
-# Cloudflare handling
-cloudflare_skip: true  # Skip pages with Cloudflare challenge
+# ============================================================================
+# CLOUDFLARE HANDLING
+# ============================================================================
+
+# Skip pages with Cloudflare challenge (recommended: true)
+cloudflare_skip: true
+
+# How long to wait for Cloudflare challenge (seconds)
 cloudflare_wait_time: 10.0
 
-# Crossref integration
-use_crossref: true  # Try Crossref for PDF URLs first
+# ============================================================================
+# CROSSREF INTEGRATION
+# ============================================================================
+
+# Try to get PDF URLs from Crossref API first (recommended: true)
+# This bypasses publisher landing pages when possible
+use_crossref: true
 """
 
-EXAMPLE_CONFIG_JSON = """{
-  "pdf_dir": "./pdfs",
-  "log_dir": "./logs",
-  "metadata_filename": "metadata.json",
-  "selenium_download_dir": null,
-  "headless": true,
-  "user_agent": null,
-  "requests_per_second": 1.0,
-  "delay_between_requests": 2.0,
-  "delay_between_batches": 10.0,
-  "max_retries": 3,
-  "timeout": 30,
-  "cloudflare_skip": true,
-  "cloudflare_wait_time": 10.0,
-  "use_crossref": true
-}
-"""
+
+def create_example_config(path: Union[str, Path] = "fetcher_config.yaml"):
+    """
+    Create an example configuration file.
+    
+    Args:
+        path: Where to save the example config (default: fetcher_config.yaml)
+    """
+    path = Path(path)
+    if path.exists():
+        raise FileExistsError(f"Config file already exists: {path}")
+    
+    with open(path, 'w') as f:
+        f.write(EXAMPLE_CONFIG_YAML)
+    
+    print(f"Created example config: {path}")
+    print("Edit this file and use with: PDFFetcher(config_file='fetcher_config.yaml')")

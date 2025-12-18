@@ -5,7 +5,7 @@ This package provides classes for fetching web pages with automatic retries,
 local file-based caching, and optional Selenium support for JavaScript-heavy
 pages and CAPTCHA handling.
 
-New in 0.2.0: PDFDownloader for downloading PDFs from DOIs
+Version 1.0.0: Production release with integrated configuration system
 """
 
 from .core import WebPageFetcher
@@ -34,9 +34,9 @@ except ImportError:
     PaywallError = None
     PDFNotFoundError = None
 
-# PDF Fetcher v2 (spec-compliant implementation)
+# PDF Fetcher (spec-compliant implementation with YAML configuration)
 try:
-    from .pdf_fetcher_v2 import (
+    from .pdf_fetcher import (
         PDFFetcher,
         DownloadStatus,
         DownloadResult,
@@ -48,7 +48,12 @@ try:
         DownloadManager,
         MetadataStore,
     )
-except ImportError:
+    # Configuration system (YAML-only)
+    from .config import PDFFetcherConfig, load_config, create_example_config
+    from .logging_config import setup_logging, create_download_summary_log
+    # Version info
+    from .version import __version__ as _pdf_fetcher_version, CHANGELOG
+except ImportError as e:
     PDFFetcher = None
     DownloadStatus = None
     DownloadResult = None
@@ -59,8 +64,15 @@ except ImportError:
     PDFLinkFinder = None
     DownloadManager = None
     MetadataStore = None
+    PDFFetcherConfig = None
+    load_config = None
+    create_example_config = None
+    setup_logging = None
+    create_download_summary_log = None
+    _pdf_fetcher_version = None
+    CHANGELOG = None
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 __author__ = "Henrik Sørensen"
 
 __all__ = [
@@ -73,7 +85,7 @@ __all__ = [
     "PDFDownloadError",
     "PaywallError",
     "PDFNotFoundError",
-    # v2 exports
+    # PDF Fetcher core
     "PDFFetcher",
     "DownloadStatus",
     "DownloadResult",
@@ -84,4 +96,11 @@ __all__ = [
     "PDFLinkFinder",
     "DownloadManager",
     "MetadataStore",
+    # PDF Fetcher configuration (YAML-only)
+    "PDFFetcherConfig",
+    "load_config",
+    "create_example_config",
+    "setup_logging",
+    "create_download_summary_log",
+    "CHANGELOG",
 ]
