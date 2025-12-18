@@ -31,3 +31,4 @@ Thumbs.db
 # User-specific
 .cache/
 *.log
+**/*.backup_*/
