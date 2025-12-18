@@ -1,0 +1,34 @@
+{
+  "10.2138/am.2011.573": {
+    "first_attempted": "2025-12-18T11:36:24.570659",
+    "last_attempted": "2025-12-18T11:36:24.570659",
+    "status": "failure",
+    "publisher": "geoscienceworld",
+    "landing_url": "https://pubs.geoscienceworld.org/msa/ammin/article/96/5-6/946/3631753",
+    "pdf_url": null,
+    "sanitized_filename": "10_2138_am_2011_573.pdf",
+    "error_reason": "Cloudflare challenge - Resource URL: https://pubs.geoscienceworld.org/msa/ammin/article/96/5-6/946/3631753, Publisher: geoscienceworld"
+  },
+  "10.1038/nature12373": {
+    "first_attempted": "2025-12-18T11:36:24.571513",
+    "last_attempted": "2025-12-18T11:36:24.571513",
+    "status": "success",
+    "publisher": "nature",
+    "landing_url": "https://www.nature.com/articles/nature12373",
+    "pdf_url": "http://www.nature.com/articles/nature12373.pdf",
+    "sanitized_filename": "10_1038_nature12373.pdf",
+    "error_reason": null,
+    "last_successful": "2025-12-18T11:36:24.571513",
+    "pdf_path": "test_pdfs/10_1038_nature12373.pdf"
+  },
+  "10.1016/j.dam.2022.11.002": {
+    "first_attempted": "2025-12-18T11:36:24.572033",
+    "last_attempted": "2025-12-18T11:36:24.572033",
+    "status": "paywall",
+    "publisher": "elsevier",
+    "landing_url": "https://www.sciencedirect.com/science/article/pii/S0166218X22002002",
+    "pdf_url": null,
+    "sanitized_filename": "10_1016_j_dam_2022_11_002.pdf",
+    "error_reason": "Paywall detected"
+  }
+}

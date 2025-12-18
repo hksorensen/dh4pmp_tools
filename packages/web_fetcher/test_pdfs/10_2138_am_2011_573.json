@@ -1,0 +1,15 @@
+{
+  "identifier": "10.2138/am.2011.573",
+  "doi": "10.2138/am.2011.573",
+  "sanitized_filename": "10_2138_am_2011_573.pdf",
+  "timestamp": "2025-12-18T11:36:24.571045",
+  "status": "failure",
+  "publisher": "geoscienceworld",
+  "landing_url": "https://pubs.geoscienceworld.org/msa/ammin/article/96/5-6/946/3631753",
+  "pdf_url": null,
+  "first_attempted": "2025-12-18T11:36:24.570230",
+  "last_attempted": "2025-12-18T11:36:24.570643",
+  "last_successful": null,
+  "error_reason": "Cloudflare challenge - Resource URL: https://pubs.geoscienceworld.org/msa/ammin/article/96/5-6/946/3631753, Publisher: geoscienceworld",
+  "cloudflare_detected": true
+}

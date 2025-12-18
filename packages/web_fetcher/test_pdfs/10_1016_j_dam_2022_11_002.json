@@ -1,0 +1,15 @@
+{
+  "identifier": "10.1016/j.dam.2022.11.002",
+  "doi": "10.1016/j.dam.2022.11.002",
+  "sanitized_filename": "10_1016_j_dam_2022_11_002.pdf",
+  "timestamp": "2025-12-18T11:36:24.572326",
+  "status": "paywall",
+  "publisher": "elsevier",
+  "landing_url": "https://www.sciencedirect.com/science/article/pii/S0166218X22002002",
+  "pdf_url": null,
+  "first_attempted": "2025-12-18T11:36:24.572020",
+  "last_attempted": "2025-12-18T11:36:24.572028",
+  "last_successful": null,
+  "error_reason": "Paywall detected",
+  "cloudflare_detected": false
+}
