@@ -1,0 +1,23 @@
+{
+  "_comment": "PDF Fetcher v2 Configuration File - Save as: fetcher_config.json",
+  
+  "pdf_dir": "./pdfs",
+  "log_dir": "./logs",
+  "metadata_filename": "metadata.json",
+  "selenium_download_dir": null,
+  
+  "headless": true,
+  "user_agent": null,
+  
+  "requests_per_second": 1.0,
+  "delay_between_requests": 2.0,
+  "delay_between_batches": 10.0,
+  
+  "max_retries": 3,
+  "timeout": 30,
+  
+  "cloudflare_skip": true,
+  "cloudflare_wait_time": 10.0,
+  
+  "use_crossref": true
+}

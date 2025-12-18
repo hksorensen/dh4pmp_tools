@@ -1,0 +1,94 @@
+# PDF Fetcher v2 Configuration File
+# Save as: fetcher_config.yaml
+
+# ============================================================================
+# DIRECTORY CONFIGURATION
+# ============================================================================
+
+# Where to save downloaded PDFs
+pdf_dir: "./pdfs"
+
+# Where to save log files (if null, uses pdf_dir)
+log_dir: "./logs"
+
+# Metadata filename (relative to pdf_dir)
+metadata_filename: "metadata.json"
+
+# Selenium download directory (if null, uses temp directory)
+# Set this if you want persistent Selenium downloads
+selenium_download_dir: null
+
+# ============================================================================
+# BROWSER CONFIGURATION
+# ============================================================================
+
+# Run browser in headless mode (no visible window)
+headless: true
+
+# Custom user agent (if null, uses default Chrome user agent)
+user_agent: null
+
+# ============================================================================
+# RATE LIMITING
+# ============================================================================
+# These settings help avoid triggering Cloudflare
+
+# Base rate limit per domain (requests per second)
+requests_per_second: 1.0
+
+# Delay between individual requests (seconds)
+# Higher = slower but safer
+delay_between_requests: 2.0
+
+# Delay between batches (seconds)
+# Take a break between batches to avoid rate limits
+delay_between_batches: 10.0
+
+# ============================================================================
+# NETWORK CONFIGURATION
+# ============================================================================
+
+# Maximum retry attempts for network errors
+max_retries: 3
+
+# Request timeout (seconds)
+timeout: 30
+
+# ============================================================================
+# CLOUDFLARE HANDLING
+# ============================================================================
+
+# Skip pages with Cloudflare challenge (recommended: true)
+# If false, will attempt to wait for Cloudflare to resolve
+cloudflare_skip: true
+
+# How long to wait for Cloudflare challenge (seconds)
+# Only relevant if cloudflare_skip is false
+cloudflare_wait_time: 10.0
+
+# ============================================================================
+# CROSSREF INTEGRATION
+# ============================================================================
+
+# Try to get PDF URLs from Crossref API first (recommended: true)
+# This bypasses publisher landing pages when possible
+use_crossref: true
+
+# ============================================================================
+# RECOMMENDED PROFILES
+# ============================================================================
+
+# CONSERVATIVE (for avoiding Cloudflare)
+# requests_per_second: 0.5
+# delay_between_requests: 3.0
+# delay_between_batches: 30.0
+
+# BALANCED (default)
+# requests_per_second: 1.0
+# delay_between_requests: 2.0
+# delay_between_batches: 10.0
+
+# AGGRESSIVE (fast, may trigger Cloudflare)
+# requests_per_second: 2.0
+# delay_between_requests: 1.0
+# delay_between_batches: 5.0
