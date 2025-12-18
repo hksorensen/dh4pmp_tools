@@ -34,6 +34,32 @@ except ImportError:
     PaywallError = None
     PDFNotFoundError = None
 
+# PDF Fetcher v2 (spec-compliant implementation)
+try:
+    from .pdf_fetcher_v2 import (
+        PDFFetcher,
+        DownloadStatus,
+        DownloadResult,
+        RateLimiter,
+        IdentifierNormalizer,
+        PublisherDetector,
+        DOIResolver,
+        PDFLinkFinder,
+        DownloadManager,
+        MetadataStore,
+    )
+except ImportError:
+    PDFFetcher = None
+    DownloadStatus = None
+    DownloadResult = None
+    RateLimiter = None
+    IdentifierNormalizer = None
+    PublisherDetector = None
+    DOIResolver = None
+    PDFLinkFinder = None
+    DownloadManager = None
+    MetadataStore = None
+
 __version__ = "0.2.0"
 __author__ = "Henrik Sørensen"
 
@@ -47,4 +73,15 @@ __all__ = [
     "PDFDownloadError",
     "PaywallError",
     "PDFNotFoundError",
+    # v2 exports
+    "PDFFetcher",
+    "DownloadStatus",
+    "DownloadResult",
+    "RateLimiter",
+    "IdentifierNormalizer",
+    "PublisherDetector",
+    "DOIResolver",
+    "PDFLinkFinder",
+    "DownloadManager",
+    "MetadataStore",
 ]

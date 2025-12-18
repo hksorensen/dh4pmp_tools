@@ -940,12 +940,9 @@ class SeleniumWebFetcher(WebPageFetcher):
             # Wait for page to load initially
             time.sleep(self.page_load_wait)
             
-            # Wait for Cloudflare challenge to potentially appear
-            # Cloudflare challenges are loaded via JavaScript AFTER the page loads
-            # They typically appear within 2-5 seconds after page load
-            # If we check too early, we'll miss them and they'll halt the process later
-            logger.debug("Waiting for potential Cloudflare challenge to appear...")
-            time.sleep(4)  # Wait for CF challenge to appear (if it's going to)
+            # Simple wait for page to fully load and any JavaScript to execute
+            logger.debug("Waiting for page to fully load...")
+            time.sleep(3)  # Wait for page content and any dynamic elements to load
             
             # Handle cookie acceptance FIRST (before checking for Cloudflare)
             # This prevents cookie click from triggering Cloudflare re-challenge
@@ -1006,20 +1003,8 @@ class SeleniumWebFetcher(WebPageFetcher):
                     logger.warning(f"Error handling cookie acceptance: {e}")
                     self._log_cookie_button_info()
             
-            # Check for and wait for Cloudflare challenge to complete
-            # Do this AFTER cookie handling to avoid conflicts
-            try:
-                challenge_still_present = self._wait_for_cloudflare_challenge()
-                
-                # If challenge is still present, switch to visible mode for manual intervention
-                if challenge_still_present:
-                    logger.warning("Cloudflare challenge still present. Switching to visible mode for manual intervention...")
-                    self._handle_cloudflare_challenge_manual(url)
-            except CloudflareRateLimitError as e:
-                # Rate limiting cannot be manually resolved - re-raise to stop processing
-                logger.error(f"Rate limiting error: {e}")
-                raise
-            
+            # Additional wait after cookie handling to ensure page is ready
+            time.sleep(2)
             
             # Wait for specific element if requested
             if wait_for_element:
@@ -1087,42 +1072,8 @@ class SeleniumWebFetcher(WebPageFetcher):
                     raise Exception("Browser window closed - page may have closed it automatically")
                 raise
             
-            # Final check: if still on Cloudflare challenge page, check if it's rate limiting
-            if self._is_cloudflare_challenge():
-                # Check if this is a "Just a moment..." rate limiting page
-                try:
-                    page_source = self.driver.page_source.lower()
-                    title = self.driver.title.lower()
-                    if 'just a moment' in title or 'just a moment' in page_source[:2000]:
-                        # This is rate limiting - don't try manual intervention
-                        raise CloudflareRateLimitError(
-                            "Cloudflare rate limiting detected. Increase wait times between requests."
-                        )
-                except CloudflareRateLimitError:
-                    raise
-                except Exception as e:
-                    logger.debug(f"Error checking for rate limiting: {e}")
-                
-                # If it's a regular challenge (not rate limiting), try manual intervention
-                logger.warning("Still on Cloudflare challenge page after automatic wait.")
-                logger.warning("Attempting manual intervention...")
-                try:
-                    self._handle_cloudflare_challenge_manual(url, timeout=180)  # 3 minutes
-                    # Check again after manual intervention
-                    if self._is_cloudflare_challenge():
-                        error_msg = (
-                            "Still on Cloudflare challenge page after manual intervention. "
-                            "The page may require more time or the challenge may have changed."
-                        )
-                        logger.error(error_msg)
-                        raise Exception(error_msg)
-                except CloudflareRateLimitError:
-                    # Re-raise rate limiting errors
-                    raise
-                except Exception as e:
-                    # If manual intervention also fails, raise the error
-                    logger.error(f"Manual intervention failed: {e}")
-                    raise
+            # Final wait to ensure all content is loaded
+            time.sleep(1)
             
             result = {
                 'url': final_url,
@@ -1560,9 +1511,9 @@ class SeleniumWebFetcher(WebPageFetcher):
             # Wait for page to load
             time.sleep(self.page_load_wait)
             
-            # Wait for potential CloudFlare challenge
-            logger.debug("Waiting for potential CloudFlare challenge...")
-            time.sleep(4)
+            # Wait for page to fully load and any JavaScript to execute
+            logger.debug("Waiting for page to fully load...")
+            time.sleep(3)
             
             # Handle cookie acceptance FIRST (before checking for PDF)
             if cookie_accept_selector:
@@ -1582,15 +1533,8 @@ class SeleniumWebFetcher(WebPageFetcher):
                 except Exception as e:
                     logger.warning(f"Error handling cookie acceptance: {e}")
             
-            # Check for and wait for CloudFlare challenge
-            try:
-                challenge_still_present = self._wait_for_cloudflare_challenge()
-                if challenge_still_present:
-                    logger.warning("CloudFlare challenge detected, attempting manual intervention...")
-                    self._handle_cloudflare_challenge_manual(url, timeout=180)
-            except CloudflareRateLimitError as e:
-                logger.error(f"CloudFlare rate limiting: {e}")
-                return None
+            # Additional wait after cookie handling
+            time.sleep(2)
             
             # Step 2: Check if current page is a PDF
             logger.debug("Step 2: Checking if current page is a PDF...")
@@ -1622,8 +1566,8 @@ class SeleniumWebFetcher(WebPageFetcher):
                     # Wait for navigation
                     time.sleep(self.page_load_wait + 2)
                     
-                    # Wait for potential CloudFlare challenge on new page
-                    time.sleep(4)
+                    # Wait for page to fully load
+                    time.sleep(3)
                     
                     # Handle cookies on new page if needed
                     if cookie_accept_selector:
@@ -1637,15 +1581,8 @@ class SeleniumWebFetcher(WebPageFetcher):
                         except Exception:
                             pass
                     
-                    # Check for CloudFlare challenge on new page
-                    try:
-                        challenge_still_present = self._wait_for_cloudflare_challenge()
-                        if challenge_still_present:
-                            logger.warning("CloudFlare challenge on PDF link page, attempting manual intervention...")
-                            self._handle_cloudflare_challenge_manual(href, timeout=180)
-                    except CloudflareRateLimitError as e:
-                        logger.error(f"CloudFlare rate limiting on PDF link: {e}")
-                        continue
+                    # Additional wait after cookie handling
+                    time.sleep(2)
                     
                     # Check if new page is a PDF
                     if self._is_pdf_page():
