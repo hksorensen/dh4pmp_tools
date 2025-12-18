@@ -51,8 +51,12 @@ delay_between_batches: 10.0
 # Maximum retry attempts for network errors
 max_retries: 3
 
-# Request timeout (seconds)
+# Request timeout (seconds) - for HTTP requests
 timeout: 30
+
+# Selenium page load timeout (seconds) - for browser operations
+# Lower values = faster failure, but may timeout on slow pages
+selenium_timeout: 30
 
 # ============================================================================
 # CLOUDFLARE HANDLING
