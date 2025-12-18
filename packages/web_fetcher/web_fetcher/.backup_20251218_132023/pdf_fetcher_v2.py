@@ -19,25 +19,6 @@ from datetime import datetime
 from dataclasses import dataclass, asdict
 from enum import Enum
 
-# Optional tqdm support for progress bars
-try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
-except ImportError:
-    TQDM_AVAILABLE = False
-    # Create a dummy tqdm class that does nothing
-    class tqdm:
-        def __init__(self, *args, **kwargs):
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def update(self, n=1):
-            pass
-        def set_description(self, desc=None):
-            pass
-
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -60,10 +41,6 @@ except ImportError:
 
 import logging
 logger = logging.getLogger(__name__)
-
-from .version import __version__, __author__
-from .config import PDFFetcherConfig, load_config
-from .logging_config import setup_logging, create_download_summary_log
 
 # Optional Crossref support
 try:
@@ -1282,25 +1259,13 @@ class PDFFetcher:
             )
         self.session.headers.update({'User-Agent': self.user_agent})
         
-        # Caching for optimizations
-        self._landing_url_cache: Dict[str, str] = {}  # DOI/URL -> landing URL
-        self._crossref_pdf_cache: Dict[str, Optional[str]] = {}  # DOI -> PDF URL (None if not found)
-        
-        # Components
-        self.doi_resolver = DOIResolver(self.session, self.rate_limiter)
-        self.download_manager = DownloadManager(self.session, self.rate_limiter, self.selenium_download_dir)
-        
-        # Setup retry strategy with enhanced connection pooling
+        # Setup retry strategy
         retry_strategy = Retry(
             total=max_retries,
             backoff_factor=1,
             status_forcelist=[500, 502, 503, 504]
         )
-        adapter = HTTPAdapter(
-            pool_connections=10,  # Number of connection pools
-            pool_maxsize=20,      # Max connections per pool
-            max_retries=retry_strategy
-        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         
@@ -1308,10 +1273,9 @@ class PDFFetcher:
         self._driver: Optional[webdriver.Chrome] = None
         self._driver_initialized = False
         
-        # Session persistence: track drivers by domain
-        self._drivers_by_domain: Dict[str, webdriver.Chrome] = {}
-        self._current_domain: Optional[str] = None
-        self._domain_driver_initialized: Dict[str, bool] = {}
+        # Components
+        self.doi_resolver = DOIResolver(self.session, self.rate_limiter)
+        self.download_manager = DownloadManager(self.session, self.rate_limiter, self.selenium_download_dir)
         
         # Optional Crossref support (for direct PDF URL lookup)
         self.crossref_fetcher = None
@@ -1323,254 +1287,74 @@ class PDFFetcher:
                 logger.warning(f"Could not initialize Crossref fetcher: {e} - will skip Crossref lookup")
                 self.crossref_fetcher = None
     
-    def _get_driver(self, domain: Optional[str] = None) -> webdriver.Chrome:
-        """
-        Get or create Selenium driver for a domain.
-        
-        Args:
-            domain: Domain name (e.g., 'pubs.geoscienceworld.org'). 
-                   If provided, reuses driver for same domain (session persistence).
-                   If None, uses single shared driver.
-        
-        Returns:
-            Chrome WebDriver instance
-        """
+    def _get_driver(self) -> webdriver.Chrome:
+        """Get or create Selenium driver."""
         if not SELENIUM_AVAILABLE:
             raise ImportError("Selenium is not available")
         
-        # If domain is provided, use domain-specific driver (session persistence)
-        if domain:
-            if domain not in self._drivers_by_domain:
-                # Create new driver for this domain
-                self._drivers_by_domain[domain] = self._create_driver()
-                self._domain_driver_initialized[domain] = True
-                logger.debug(f"Created new driver for domain: {domain}")
-            return self._drivers_by_domain[domain]
-        
-        # Legacy: single shared driver (for backward compatibility)
         if not self._driver_initialized:
-            self._driver = self._create_driver()
+            options = ChromeOptions()
+            if self.headless:
+                options.add_argument('--headless=new')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument(f'--user-agent={self.user_agent}')
+            options.add_argument('--window-size=1920,1080')
+            
+            # Configure download preferences
+            # Set download directory (must be absolute path)
+            download_dir_str = str(self.selenium_download_dir.resolve())
+            prefs = {
+                "download.default_directory": download_dir_str,
+                "download.prompt_for_download": False,
+                "download.directory_upgrade": True,
+                "plugins.always_open_pdf_externally": True,  # Download PDFs instead of viewing
+                "plugins.plugins_disabled": ["Chrome PDF Viewer"],  # Disable PDF viewer
+            }
+            options.add_experimental_option("prefs", prefs)
+            logger.debug(f"Chrome download directory set to: {download_dir_str}")
+            
+            # Disable PDF viewer
+            options.add_argument('--disable-pdf-viewer')
+            options.add_argument('--disable-extensions')
+            
+            self._driver = webdriver.Chrome(options=options)
             self._driver_initialized = True
             logger.info(f"Selenium driver initialized with download directory: {self.selenium_download_dir}")
         
         return self._driver
     
-    def _create_driver(self) -> webdriver.Chrome:
-        """Create a new Chrome driver with configured options.
-        
-        Uses standard Selenium (not undetected-chromedriver) and Chrome's
-        default user-agent to avoid triggering Cloudflare bot detection.
-        """
-        options = ChromeOptions()
-        if self.headless:
-            options.add_argument('--headless=new')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-blink-features=AutomationControlled')
-        # Don't set custom user-agent - use Chrome's default to avoid Cloudflare detection
-        # (Custom user-agents can trigger bot detection as shown in tests)
-        options.add_argument('--window-size=1920,1080')
-        
-        # Configure download preferences
-        # Set download directory (must be absolute path)
-        download_dir_str = str(self.selenium_download_dir.resolve())
-        prefs = {
-            "download.default_directory": download_dir_str,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "plugins.always_open_pdf_externally": True,  # Download PDFs instead of viewing
-            "plugins.plugins_disabled": ["Chrome PDF Viewer"],  # Disable PDF viewer
-        }
-        options.add_experimental_option("prefs", prefs)
-        logger.debug(f"Chrome download directory set to: {download_dir_str}")
-        
-        # Disable PDF viewer
-        options.add_argument('--disable-pdf-viewer')
-        options.add_argument('--disable-extensions')
-        
-        driver = webdriver.Chrome(options=options)
-        
-        # Enable downloads via CDP
-        driver.execute_cdp_cmd('Page.setDownloadBehavior', {
-            'behavior': 'allow',
-            'downloadPath': str(self.selenium_download_dir.resolve())
-        })
-        
-        return driver
-    
     def _is_cloudflare_challenge(self, driver) -> bool:
-        """Check if current page is a Cloudflare challenge.
-        
-        Uses improved detection logic that distinguishes between real challenges
-        and false positives (e.g., 'challenge-platform' in large article pages).
-        """
+        """Check if current page is a Cloudflare challenge."""
         try:
             page_source = driver.page_source.lower()
             title = driver.title.lower()
-            page_size = len(page_source)
             
-            # Primary indicators (definitive Cloudflare challenge)
-            primary_indicators = [
-                'i am human' in page_source,
-                'just a moment' in title,
-                'are you a robot' in page_source,  # Cloudflare Turnstile challenge
-                'cf-challenge' in page_source,
-                'cf-turnstile' in page_source,
-                'turnstile' in page_source,  # Cloudflare Turnstile
-                'checking your browser' in page_source[:2000],
-            ]
+            # Check for manual CAPTCHA checkbox
+            has_checkbox = (
+                'i am human' in page_source or
+                'i\'m not a robot' in page_source or
+                'verify you are human' in page_source or
+                'cf-challenge' in page_source or
+                'challenge-platform' in page_source
+            )
             
-            # Secondary indicators (may appear in normal pages too, need context)
-            secondary_indicators = [
-                'challenge-platform' in page_source,
-                'cf-browser-verification' in page_source,
-            ]
+            # Check for "Just a moment" page
+            is_just_moment = 'just a moment' in title or 'just a moment' in page_source[:2000]
             
-            # If we have primary indicators, it's definitely Cloudflare
-            if any(primary_indicators):
-                return True
+            # Check for challenge widgets
+            has_challenge_widget = (
+                'cf-chl-widget' in page_source or
+                'cf-turnstile' in page_source
+            )
             
-            # For secondary indicators, require small page size (< 100KB) or specific title
-            # Challenge pages are typically small, while real article pages are large (MB)
-            if any(secondary_indicators):
-                if page_size < 100000 or 'just a moment' in title or 'checking' in title:
-                    return True
-            
-            return False
+            return has_checkbox or is_just_moment or has_challenge_widget
         except:
             return False
     
-    def _prefilter_existing(self, identifiers: List[str]) -> Tuple[List[str], List[str]]:
-        """
-        OPTIMIZATION: Pre-filter identifiers to skip already downloaded files.
-        
-        This checks file existence BEFORE any normalization or network calls,
-        which can save significant time for large batches.
-        
-        Returns:
-            (existing_identifiers, to_download_identifiers)
-        """
-        existing = []
-        to_download = []
-        
-        logger.info(f"Pre-filtering {len(identifiers)} identifiers for existing files...")
-        
-        for identifier in identifiers:
-            try:
-                # Quick check: try to normalize and check file
-                kind, doi, url = IdentifierNormalizer.normalize(identifier)
-                
-                # Get sanitized filename
-                if doi:
-                    sanitized = IdentifierNormalizer.sanitize_for_filename(doi)
-                else:
-                    sanitized = hashlib.md5(url.encode()).hexdigest()[:16]
-                
-                pdf_path = self.pdf_dir / f"{sanitized}.pdf"
-                
-                # Check if file exists and is valid PDF
-                if pdf_path.exists():
-                    try:
-                        header = pdf_path.read_bytes()[:4]
-                        if header == b'%PDF':
-                            existing.append(identifier)
-                            continue
-                    except:
-                        pass  # File might be corrupted, re-download
-                
-                to_download.append(identifier)
-            except Exception as e:
-                logger.debug(f"Error pre-filtering {identifier}: {e}")
-                to_download.append(identifier)  # Include on error
-        
-        logger.info(f"Pre-filter complete: {len(existing)} already exist, {len(to_download)} to download")
-        return existing, to_download
-    
-    def _sort_identifiers_by_domain(self, identifiers: List[str]) -> List[str]:
-        """
-        Sort identifiers by their expected domain for session persistence.
-        
-        This allows processing all identifiers from the same publisher/domain
-        together, so we only need to pass Cloudflare once per domain.
-        """
-        # Group by domain (best effort - we may not know domain until resolution)
-        domain_groups: Dict[str, List[Tuple[str, str]]] = {}
-        unknown_domain: List[str] = []
-        
-        for identifier in identifiers:
-            try:
-                kind, doi, url = IdentifierNormalizer.normalize(identifier)
-                
-                if kind == 'resource_url':
-                    # We know the domain from the URL
-                    domain = urlparse(url).netloc
-                    if domain not in domain_groups:
-                        domain_groups[domain] = []
-                    domain_groups[domain].append((domain, identifier))
-                elif kind in ('doi', 'doi_url'):
-                    # For DOIs, try to predict domain from DOI prefix
-                    # Common patterns: 10.1016 -> sciencedirect.com, 10.1038 -> nature.com, etc.
-                    predicted_domain = self._predict_domain_from_doi(doi)
-                    if predicted_domain:
-                        if predicted_domain not in domain_groups:
-                            domain_groups[predicted_domain] = []
-                        domain_groups[predicted_domain].append((predicted_domain, identifier))
-                    else:
-                        unknown_domain.append(identifier)
-            except:
-                unknown_domain.append(identifier)
-        
-        # Sort domains alphabetically for consistent ordering
-        sorted_domains = sorted(domain_groups.keys())
-        
-        # Build sorted list: process each domain group together
-        sorted_identifiers = []
-        for domain in sorted_domains:
-            # Sort within domain group (by identifier for consistency)
-            domain_items = sorted(domain_groups[domain], key=lambda x: x[1])
-            sorted_identifiers.extend([item[1] for item in domain_items])
-        
-        # Append unknown domain items at the end
-        sorted_identifiers.extend(unknown_domain)
-        
-        return sorted_identifiers
-    
-    def _predict_domain_from_doi(self, doi: str) -> Optional[str]:
-        """Predict domain from DOI prefix (heuristic)."""
-        # Common DOI prefixes and their domains
-        doi_prefixes = {
-            '10.1016': 'sciencedirect.com',  # Elsevier
-            '10.1038': 'nature.com',  # Nature
-            '10.1371': 'plos.org',  # PLOS
-            '10.1126': 'science.org',  # Science
-            '10.2138': 'pubs.geoscienceworld.org',  # GeoScienceWorld
-            '10.1007': 'link.springer.com',  # Springer
-            '10.1111': 'onlinelibrary.wiley.com',  # Wiley
-            '10.1093': 'academic.oup.com',  # Oxford
-            '10.1103': 'aps.org',  # American Physical Society
-        }
-        
-        for prefix, domain in doi_prefixes.items():
-            if doi.startswith(prefix):
-                return domain
-        
-        return None
-    
-    def _cleanup_domain_drivers(self):
-        """Clean up all domain-specific drivers."""
-        for domain, driver in self._drivers_by_domain.items():
-            try:
-                driver.quit()
-                logger.debug(f"Closed driver for domain: {domain}")
-            except:
-                pass
-        
-        self._drivers_by_domain.clear()
-        self._domain_driver_initialized.clear()
-        self._current_domain = None
-    
     def _close_driver(self):
-        """Close Selenium driver (legacy single driver)."""
+        """Close Selenium driver."""
         if self._driver and self._driver_initialized:
             try:
                 self._driver.quit()
@@ -1578,9 +1362,6 @@ class PDFFetcher:
                 pass
             self._driver = None
             self._driver_initialized = False
-        
-        # Also clean up domain drivers
-        self._cleanup_domain_drivers()
         
         # Clean up temporary download directory if we created it
         if hasattr(self, '_selenium_download_dir_is_temp') and self._selenium_download_dir_is_temp:
@@ -1600,20 +1381,6 @@ class PDFFetcher:
                     logger.debug(f"Cleaned up temporary download directory: {self.selenium_download_dir}")
                 except Exception as e:
                     logger.debug(f"Could not clean up temporary download directory: {e}")
-    
-    def close(self):
-        """Close all resources (drivers, sessions, etc.)."""
-        self._close_driver()
-        if hasattr(self, 'session'):
-            self.session.close()
-    
-    def __enter__(self):
-        """Context manager entry."""
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        self.close()
     
     def download(self, identifier: str) -> DownloadResult:
         """
@@ -1646,7 +1413,7 @@ class PDFFetcher:
             result.sanitized_filename = f"{sanitized}.pdf"
             pdf_path = self.pdf_dir / result.sanitized_filename
             
-            # OPTIMIZATION: Check if already exists BEFORE any network calls
+            # Check if already exists
             if pdf_path.exists():
                 # Verify it's a valid PDF
                 try:
@@ -1656,117 +1423,61 @@ class PDFFetcher:
                         result.pdf_path = pdf_path
                         result.last_successful = datetime.utcnow().isoformat()
                         self.metadata_store.update(result)
-                        logger.debug(f"PDF already exists: {pdf_path}")
+                        logger.info(f"PDF already exists: {pdf_path}")
                         return result
                 except:
                     pass  # File might be corrupted, re-download
             
-            # OPTIMIZATION: Try to get landing URL and PDF URL from Crossref metadata first (if available)
-            # Crossref metadata is already cached in api_client, so fetch once and use for both
-            crossref_metadata = None
-            landing_url = None
-            if kind in ('doi', 'doi_url') and self.crossref_fetcher and doi:
-                try:
-                    # fetch_by_doi() already uses api_client cache, so this is fast if cached
-                    crossref_metadata = self.crossref_fetcher.fetch_by_doi(doi)
-                    if crossref_metadata:
-                        # Crossref metadata may include landing URLs in the 'link' field
-                        # Look for non-PDF links (these are often landing pages)
-                        links = crossref_metadata.get('link', [])
-                        for link in links:
-                            link_url = link.get('URL', '')
-                            content_type = link.get('content-type', '')
-                            # Skip PDF links, look for landing page links
-                            if link_url and 'pdf' not in link_url.lower() and 'pdf' not in content_type.lower():
-                                # Common landing page indicators
-                                if any(indicator in link_url.lower() for indicator in ['article', 'abstract', 'full', 'view', 'doi.org']):
-                                    landing_url = link_url
-                                    logger.debug(f"Found landing URL from Crossref metadata: {landing_url}")
-                                    break
-                except:
-                    pass  # Fall back to resolution if Crossref doesn't have it
-            
-            # If Crossref didn't provide landing URL, resolve it
-            if not landing_url:
-                # OPTIMIZATION: Check cache for landing URL resolution
-                cache_key = identifier if kind == 'resource_url' else url
-                if cache_key in self._landing_url_cache:
-                    landing_url = self._landing_url_cache[cache_key]
-                    logger.debug(f"Using cached landing URL for {identifier}")
-                else:
-                    # Resolve to landing URL
+            # Resolve to landing URL
+            try:
+                if kind in ('doi', 'doi_url'):
+                    # Try requests first
                     try:
-                        if kind in ('doi', 'doi_url'):
-                            # Try requests first
-                            try:
-                                landing_url = self.doi_resolver.resolve(url, use_selenium=False)
-                            except:
-                                # Fall back to Selenium
-                                # We don't know domain yet, so use default driver
-                                driver = self._get_driver()
-                                landing_url = self.doi_resolver.resolve(url, use_selenium=True, selenium_driver=driver)
-                        else:
-                            landing_url = url
-                        
-                        # Cache the result
-                        self._landing_url_cache[cache_key] = landing_url
-                    except Exception as e:
-                        result.status = DownloadStatus.INVALID_IDENTIFIER
-                        result.error_reason = f"Failed to resolve identifier: {e}"
-                        self.metadata_store.update(result)
-                        return result
+                        landing_url = self.doi_resolver.resolve(url, use_selenium=False)
+                    except:
+                        # Fall back to Selenium
+                        driver = self._get_driver()
+                        landing_url = self.doi_resolver.resolve(url, use_selenium=True, selenium_driver=driver)
+                else:
+                    landing_url = url
+                
+                result.landing_url = landing_url
+            except Exception as e:
+                result.status = DownloadStatus.INVALID_IDENTIFIER
+                result.error_reason = f"Failed to resolve identifier: {e}"
+                self.metadata_store.update(result)
+                return result
             
-            result.landing_url = landing_url
-            
-            # Detect publisher and extract domain for session persistence
+            # Detect publisher
             publisher = PublisherDetector.detect(landing_url)
             result.publisher = publisher
-            domain = urlparse(landing_url).netloc
             
             # Strategy 1: Try Crossref for direct PDF URL (if DOI and Crossref available)
-            # OPTIMIZATION: Reuse crossref_metadata if we already fetched it above
-            # Crossref metadata is already cached in api_client, so we only cache extracted PDF URL locally
             pdf_url = None
             if kind in ('doi', 'doi_url') and self.crossref_fetcher and doi:
-                # Check our local cache (for quick lookup without re-extracting from metadata)
-                if doi in self._crossref_pdf_cache:
-                    pdf_url = self._crossref_pdf_cache[doi]
-                    if pdf_url:
-                        logger.debug(f"Using cached Crossref PDF URL for {doi}")
-                else:
-                    try:
-                        logger.info(f"Trying Crossref for PDF URL: {doi}")
-                        # Reuse metadata if we already fetched it above, otherwise fetch now
-                        # fetch_by_doi() already uses api_client cache, so this is fast if cached
-                        if crossref_metadata is None:
-                            crossref_metadata = self.crossref_fetcher.fetch_by_doi(doi)
-                        
-                        if crossref_metadata:
-                            pdf_url = CrossrefPDFExtractor.extract_pdf_url(crossref_metadata)
-                            # Cache only the extracted PDF URL locally (full metadata is in api_client cache)
-                            self._crossref_pdf_cache[doi] = pdf_url
-                            if pdf_url:
-                                logger.info(f"✓ Found PDF URL via Crossref: {pdf_url}")
-                                # Use the Crossref PDF URL directly - bypass landing page
-                                result.landing_url = landing_url  # Keep original landing URL for reference
-                                # Skip landing page navigation - proceed directly to download
-                            else:
-                                logger.debug("Crossref metadata found but no PDF URL available")
+                try:
+                    logger.info(f"Trying Crossref for PDF URL: {doi}")
+                    metadata = self.crossref_fetcher.fetch_by_doi(doi)
+                    if metadata:
+                        pdf_url = CrossrefPDFExtractor.extract_pdf_url(metadata)
+                        if pdf_url:
+                            logger.info(f"✓ Found PDF URL via Crossref: {pdf_url}")
+                            # Use the Crossref PDF URL directly - bypass landing page
+                            result.landing_url = landing_url  # Keep original landing URL for reference
+                            # Skip landing page navigation - proceed directly to download
                         else:
-                            logger.debug("Crossref did not return metadata for this DOI")
-                            self._crossref_pdf_cache[doi] = None  # Cache negative result
-                    except Exception as e:
-                        logger.debug(f"Crossref lookup failed: {e} - falling back to landing page")
-                        self._crossref_pdf_cache[doi] = None  # Cache negative result
-                        pdf_url = None
+                            logger.debug("Crossref metadata found but no PDF URL available")
+                    else:
+                        logger.debug("Crossref did not return metadata for this DOI")
+                except Exception as e:
+                    logger.debug(f"Crossref lookup failed: {e} - falling back to landing page")
+                    pdf_url = None
             
             # Strategy 2: Find PDF URL from landing page (if Crossref didn't provide one)
             driver = None
             if not pdf_url:
                 logger.info("Finding PDF URL from landing page...")
-                # Use domain-specific driver for session persistence
-                driver = self._get_driver(domain=domain)
-                self._current_domain = domain  # Track current domain
+                driver = self._get_driver()
                 driver.get(landing_url)
                 time.sleep(2)  # Wait for page load
                 
@@ -1826,14 +1537,7 @@ class PDFFetcher:
                     pass
             else:
                 # We got PDF URL from Crossref - no landing page visit needed
-                # But we might still want to use a domain-specific driver for the download
-                if domain:
-                    try:
-                        driver_for_download = self._get_driver(domain=domain)
-                        cookies = driver_for_download.get_cookies()
-                    except:
-                        pass
-                logger.debug("Using Crossref PDF URL - attempting to use domain driver for cookies")
+                logger.debug("Using Crossref PDF URL - no landing page cookies available")
             
             success = self.download_manager.download(
                 pdf_url, 
@@ -1865,281 +1569,85 @@ class PDFFetcher:
         self, 
         identifiers: List[str], 
         batch_size: int = 10,
-        retry_failures: bool = True,
-        sort_by_domain: bool = True,
-        progress: bool = True,
-        prefilter: bool = True
+        retry_failures: bool = True
     ) -> List[DownloadResult]:
         """
         Download PDFs for multiple identifiers with batching and retry support.
-        
-        Uses session persistence: sorts identifiers by domain and reuses the same
-        Selenium driver for requests to the same domain. This means you only need
-        to pass Cloudflare once per domain, then subsequent requests in the same
-        session should work.
-        
-        OPTIMIZATIONS:
-        - Pre-filters existing files before any network calls
-        - Skips delays for direct PDF URLs (from Crossref)
-        - Caches landing page resolutions
-        - Zero delays when switching domains
         
         Args:
             identifiers: List of DOIs, DOI-URLs, or resource URLs
             batch_size: Number of downloads per batch (smaller = less likely to trigger Cloudflare)
             retry_failures: Whether to retry failed downloads at the end
-            sort_by_domain: If True, sort identifiers by domain first (enables session persistence)
-            progress: If True, show tqdm progress bar (requires tqdm package)
-            prefilter: If True, pre-filter existing files before processing (default: True)
         
         Returns:
             List of DownloadResult objects
         """
-        all_results: List[DownloadResult] = []
-        
-        # OPTIMIZATION: Pre-filter existing files
-        if prefilter:  # prefilter parameter is defined in function signature
-            existing_ids, identifiers = self._prefilter_existing(identifiers)
-            
-            # Create results for existing files
-            for identifier in existing_ids:
-                try:
-                    kind, doi, url = IdentifierNormalizer.normalize(identifier)
-                    if doi:
-                        sanitized = IdentifierNormalizer.sanitize_for_filename(doi)
-                    else:
-                        sanitized = hashlib.md5(url.encode()).hexdigest()[:16]
-                    
-                    pdf_path = self.pdf_dir / f"{sanitized}.pdf"
-                    
-                    result = DownloadResult(
-                        identifier=identifier,
-                        status=DownloadStatus.ALREADY_EXISTS,
-                        pdf_path=pdf_path,
-                        first_attempted=datetime.utcnow().isoformat(),
-                        last_attempted=datetime.utcnow().isoformat(),
-                        last_successful=datetime.utcnow().isoformat()
-                    )
-                    all_results.append(result)
-                    self.metadata_store.update(result)
-                except:
-                    pass  # Skip if normalization fails
-        
-        if not identifiers:
-            logger.info("All files already exist!")
-            return all_results
-        
-        results: List[DownloadResult] = []
+        results = []
         total = len(identifiers)
         
-        # Sort by domain for session persistence
-        if sort_by_domain:
-            logger.info("Sorting identifiers by domain for session persistence...")
-            sorted_identifiers = self._sort_identifiers_by_domain(identifiers)
-            logger.info(f"Sorted {len(sorted_identifiers)} identifiers into domain groups")
-        else:
-            sorted_identifiers = identifiers
-        
         logger.info(f"Starting batch download: {total} identifiers, batch size: {batch_size}")
-        if sort_by_domain:
-            logger.info("Session persistence enabled: reusing drivers for same-domain requests")
         
-        # Setup progress bar
-        pbar = None
-        if progress and TQDM_AVAILABLE:
-            pbar = tqdm(total=total, desc="Downloading PDFs", unit="PDF")
-        elif progress and not TQDM_AVAILABLE:
-            logger.warning("tqdm not available - install with 'pip install tqdm' for progress bars")
-        
-        try:
-            # Process in batches
-            current_domain = None
-            for batch_start in range(0, total, batch_size):
-                batch_end = min(batch_start + batch_size, total)
-                batch = sorted_identifiers[batch_start:batch_end]
-                batch_num = (batch_start // batch_size) + 1
-                total_batches = (total + batch_size - 1) // batch_size
-                
-                if pbar:
-                    pbar.set_description(f"Batch {batch_num}/{total_batches}")
-                else:
-                    logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} items)")
-                
-                for i, identifier in enumerate(batch, 1):
-                    # Track domain changes for logging and delay optimization
-                    domain_changed = False
-                    previous_domain = current_domain
-                    
-                    # Try to detect domain before download (for resource URLs)
-                    try:
-                        kind, doi, url = IdentifierNormalizer.normalize(identifier)
-                        if kind == 'resource_url':
-                            domain = urlparse(url).netloc
-                            if domain != current_domain:
-                                previous_domain = current_domain
-                                current_domain = domain
-                                domain_changed = True
-                                if pbar:
-                                    pbar.set_postfix_str(f"Domain: {domain}")
-                                else:
-                                    logger.info(f"Switching to domain: {domain}")
-                    except:
-                        pass
-                    
-                    if pbar:
-                        pbar.set_postfix_str(f"Downloading: {identifier[:50]}...")
-                    else:
-                        logger.info(f"[{batch_start + i}/{total}] Downloading: {identifier}")
-                    
-                    # Track if we used Crossref (for delay optimization)
-                    used_crossref = False
-                    if kind in ('doi', 'doi_url') and doi:
-                        # Check if this DOI has Crossref PDF URL cached
-                        if doi in self._crossref_pdf_cache and self._crossref_pdf_cache[doi]:
-                            used_crossref = True
-                    
-                    result = self.download(identifier)
-                    results.append(result)
-                    
-                    # Update used_crossref flag from result if available
-                    # (We'll check this in the delay logic below)
-                    
-                    # Update current_domain from result if we didn't know it before
-                    if result.landing_url:
-                        new_domain = urlparse(result.landing_url).netloc
-                        if new_domain != current_domain:
-                            previous_domain = current_domain
-                            current_domain = new_domain
-                            domain_changed = True
-                            if not pbar:
-                                logger.debug(f"Detected domain change to: {current_domain}")
-                    
-                    # Update progress bar
-                    if pbar:
-                        status_emoji = {
-                            DownloadStatus.SUCCESS: "✓",
-                            DownloadStatus.ALREADY_EXISTS: "○",
-                            DownloadStatus.FAILURE: "✗",
-                            DownloadStatus.PAYWALL: "🔒",
-                        }.get(result.status, "?")
-                        pbar.set_postfix_str(f"{status_emoji} {result.status.value}")
-                        pbar.update(1)
-                    
-                    # Delay between requests within batch
-                    # OPTIMIZATION: Zero delay if:
-                    # 1. We just switched domains (different site = no rate limit concern)
-                    # 2. We got PDF URL from Crossref (direct download, no landing page navigation)
-                    should_delay = True
-                    delay_reason = None
-                    
-                    if i < len(batch):
-                        # Check if we used Crossref (direct PDF URL, no landing page)
-                        if result.pdf_url and used_crossref:
-                            should_delay = False
-                            delay_reason = "direct PDF URL from Crossref"
-                        elif domain_changed and previous_domain is not None:
-                            should_delay = False
-                            delay_reason = f"domain changed from {previous_domain} to {current_domain}"
-                        
-                        if should_delay:
-                            # Same domain - apply delay to avoid rate limiting
-                            time.sleep(self.delay_between_requests)
-                        else:
-                            if not pbar:
-                                logger.debug(f"Skipping delay: {delay_reason}")
-                
-                # Delay between batches
-                # Check if next batch is from a different domain - if so, zero delay
-                if batch_end < total:
-                    next_batch_start = batch_end
-                    next_identifier = sorted_identifiers[next_batch_start] if next_batch_start < len(sorted_identifiers) else None
-                    next_domain = None
-                    
-                    if next_identifier:
-                        try:
-                            kind, doi, url = IdentifierNormalizer.normalize(next_identifier)
-                            if kind == 'resource_url':
-                                next_domain = urlparse(url).netloc
-                        except:
-                            pass
-                    
-                    # If next batch is from different domain, skip delay
-                    if next_domain and next_domain != current_domain:
-                        if pbar:
-                            pbar.set_postfix_str("Switching domain - no delay")
-                        else:
-                            logger.info(f"Batch {batch_num} complete. Next batch is different domain ({next_domain}) - skipping delay")
-                    else:
-                        if pbar:
-                            pbar.set_postfix_str(f"Waiting {self.delay_between_batches}s...")
-                        else:
-                            logger.info(f"Batch {batch_num} complete. Waiting {self.delay_between_batches}s before next batch...")
-                        time.sleep(self.delay_between_batches)
+        # Process in batches
+        for batch_start in range(0, total, batch_size):
+            batch_end = min(batch_start + batch_size, total)
+            batch = identifiers[batch_start:batch_end]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (total + batch_size - 1) // batch_size
             
-            # Retry failures if requested
-            if retry_failures:
-                failures = [r for r in results if r.status == DownloadStatus.FAILURE]
-                if failures:
-                    if pbar:
-                        pbar.set_description(f"Retrying {len(failures)} failures")
-                        pbar.set_postfix_str("")
-                    else:
-                        logger.info(f"Retrying {len(failures)} failed downloads with longer delays...")
-                    time.sleep(self.delay_between_batches * 2)  # Longer delay before retries
-                    
-                    for result in failures:
-                        if pbar:
-                            pbar.set_postfix_str(f"Retrying: {result.identifier[:50]}...")
-                        else:
-                            logger.info(f"Retrying: {result.identifier}")
-                        retry_result = self.download(result.identifier)
-                        # Update the original result
-                        result.status = retry_result.status
-                        result.error_reason = retry_result.error_reason
-                        result.pdf_path = retry_result.pdf_path
-                        result.last_successful = retry_result.last_successful
-                        if pbar:
-                            pbar.update(0)  # Update without incrementing total
-                        time.sleep(self.delay_between_requests * 2)  # Longer delay for retries
+            logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} items)")
             
-            # Clean up domain-specific drivers
-            self._cleanup_domain_drivers()
+            for i, identifier in enumerate(batch, 1):
+                logger.info(f"[{batch_start + i}/{total}] Downloading: {identifier}")
+                result = self.download(identifier)
+                results.append(result)
+                
+                # Delay between requests within batch
+                if i < len(batch):
+                    time.sleep(self.delay_between_requests)
+            
+            # Delay between batches
+            if batch_end < total:
+                logger.info(f"Batch {batch_num} complete. Waiting {self.delay_between_batches}s before next batch...")
+                time.sleep(self.delay_between_batches)
         
-        finally:
-            if pbar:
-                pbar.close()
+        # Retry failures if requested
+        if retry_failures:
+            failures = [r for r in results if r.status == DownloadStatus.FAILURE]
+            if failures:
+                logger.info(f"Retrying {len(failures)} failed downloads with longer delays...")
+                time.sleep(self.delay_between_batches * 2)  # Longer delay before retries
+                
+                for result in failures:
+                    logger.info(f"Retrying: {result.identifier}")
+                    retry_result = self.download(result.identifier)
+                    # Update the original result
+                    result.status = retry_result.status
+                    result.error_reason = retry_result.error_reason
+                    result.pdf_path = retry_result.pdf_path
+                    result.last_successful = retry_result.last_successful
+                    time.sleep(self.delay_between_requests * 2)  # Longer delay for retries
         
         # Summary
         success_count = sum(1 for r in results if r.status == DownloadStatus.SUCCESS)
         failure_count = sum(1 for r in results if r.status == DownloadStatus.FAILURE)
         already_exists = sum(1 for r in results if r.status == DownloadStatus.ALREADY_EXISTS)
         
-        # Combine pre-filtered results with download results
-        final_results = all_results + results
-        
-        success_count = sum(1 for r in final_results if r.status == DownloadStatus.SUCCESS)
-        failure_count = sum(1 for r in final_results if r.status == DownloadStatus.FAILURE)
-        already_exists = sum(1 for r in final_results if r.status == DownloadStatus.ALREADY_EXISTS)
-        
         logger.info(f"Batch download complete: {success_count} succeeded, {already_exists} already existed, {failure_count} failed")
         
-        # Try to create summary log (handle case where config might not be available)
-        try:
-            # Try to get log directory from config if available
-            log_dir = None
-            if hasattr(self, 'config') and self.config:
-                log_dir = getattr(self.config, 'log_dir', None)
-            
-            # If no config, use pdf_dir as fallback
-            if not log_dir:
-                log_dir = self.pdf_dir
-            
-            summary_file = create_download_summary_log(final_results, log_dir)
-            logger.info(f"Download summary saved to: {summary_file}")
-        except Exception as e:
-            logger.debug(f"Could not create summary log: {e}")
-        
-        return final_results
+        return results
+    
+    def close(self):
+        """Close resources."""
+        self._close_driver()
+        self.session.close()
+    
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.close()
 
 
 # Example usage
