@@ -1,0 +1,92 @@
+{
+  "timestamp": "2025-12-18T13:40:08.264185",
+  "test_urls": [
+    {
+      "name": "Elsevier/ScienceDirect DOI (10.1016/j.jcp.2019.108971)",
+      "url": "https://doi.org/10.1016/j.jcp.2019.108971",
+      "expected_cloudflare": false
+    }
+  ],
+  "results": [
+    {
+      "strategy": "standard_selenium",
+      "url": "https://doi.org/10.1016/j.jcp.2019.108971",
+      "cloudflare_detected": false,
+      "page_loaded": true,
+      "page_size": 4029530,
+      "time_taken": 5.511703014373779,
+      "error": null,
+      "success": true,
+      "current_url": "https://www.sciencedirect.com/science/article/pii/S002199911930676X?via%3Dihub",
+      "page_title": "Bernstein-B\u00e9zier weight-adjusted discontinuous Galerkin methods for wave propagation in heterogeneou",
+      "has_content_indicators": true
+    },
+    {
+      "strategy": "undetected_chromedriver",
+      "url": "https://doi.org/10.1016/j.jcp.2019.108971",
+      "cloudflare_detected": false,
+      "page_loaded": true,
+      "page_size": 4029303,
+      "time_taken": 8.11095404624939,
+      "error": null,
+      "success": true,
+      "current_url": "https://www.sciencedirect.com/science/article/pii/S002199911930676X?via%3Dihub",
+      "page_title": "Bernstein-B\u00e9zier weight-adjusted discontinuous Galerkin methods for wave propagation in heterogeneou",
+      "has_content_indicators": true
+    },
+    {
+      "strategy": "user_agent_rotation",
+      "url": "https://doi.org/10.1016/j.jcp.2019.108971",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Ap...",
+      "cloudflare_detected": true,
+      "page_loaded": true,
+      "page_size": 836002,
+      "time_taken": 4.571413040161133,
+      "error": "Cloudflare challenge detected",
+      "success": false,
+      "current_url": "https://www.sciencedirect.com/science/article/pii/S002199911930676X?via%3Dihub",
+      "page_title": "Just a moment...",
+      "has_content_indicators": true
+    },
+    {
+      "strategy": "combined_undetected_ua",
+      "url": "https://doi.org/10.1016/j.jcp.2019.108971",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Ap...",
+      "cloudflare_detected": true,
+      "page_loaded": true,
+      "page_size": 836002,
+      "time_taken": 6.905719995498657,
+      "error": "Cloudflare challenge detected",
+      "success": false,
+      "current_url": "https://www.sciencedirect.com/science/article/pii/S002199911930676X?via%3Dihub",
+      "page_title": "Just a moment...",
+      "has_content_indicators": true
+    }
+  ],
+  "summary": {
+    "standard_selenium": {
+      "total": 1,
+      "cloudflare_hits": 0,
+      "successes": 1,
+      "errors": 0
+    },
+    "undetected_chromedriver": {
+      "total": 1,
+      "cloudflare_hits": 0,
+      "successes": 1,
+      "errors": 0
+    },
+    "user_agent_rotation": {
+      "total": 1,
+      "cloudflare_hits": 1,
+      "successes": 0,
+      "errors": 0
+    },
+    "combined_undetected_ua": {
+      "total": 1,
+      "cloudflare_hits": 1,
+      "successes": 0,
+      "errors": 0
+    }
+  }
+}
