@@ -72,6 +72,9 @@ except ImportError as e:
     _pdf_fetcher_version = None
     CHANGELOG = None
 
+# Note: Pipeline base classes have been moved to the 'pipelines' package
+# Import them with: from pipelines import BasePipeline, PipelineConfig, PipelineResult
+
 __version__ = "1.0.0"
 __author__ = "Henrik Sørensen"
 

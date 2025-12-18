@@ -33,6 +33,13 @@ Tools for working with arXiv metadata.
 - Filtering and analysis
 - Bulk download support
 
+### [pipelines](pipelines/)
+Reusable data pipeline framework.
+- Generic `BasePipeline` class for any workflow
+- Configuration and result tracking
+- Built-in logging and error handling
+- Zero dependencies (pure Python)
+
 ## Installation
 
 Install all packages:
