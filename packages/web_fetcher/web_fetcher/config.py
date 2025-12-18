@@ -40,7 +40,8 @@ class PDFFetcherConfig:
     
     # Network configuration
     max_retries: int = 3
-    timeout: int = 30
+    timeout: int = 30  # HTTP request timeout (seconds)
+    selenium_timeout: int = 30  # Selenium page load timeout (seconds)
     
     # Cloudflare handling
     cloudflare_skip: bool = True  # If True, skip pages with Cloudflare challenge
