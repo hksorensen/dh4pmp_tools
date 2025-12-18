@@ -12,12 +12,14 @@ import hashlib
 import tempfile
 import shutil
 import random
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from urllib.parse import urljoin, urlparse
 from datetime import datetime
 from dataclasses import dataclass, asdict
 from enum import Enum
+from contextlib import contextmanager
 
 # Optional tqdm support for progress bars
 try:
@@ -41,6 +43,10 @@ except ImportError:
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+try:
+    from urllib3.exceptions import ReadTimeoutError as Urllib3ReadTimeoutError
+except ImportError:
+    Urllib3ReadTimeoutError = None
 
 try:
     from selenium import webdriver
@@ -319,9 +325,13 @@ class PDFLinkFinder:
         Returns:
             PDF URL if found, None otherwise
         """
-        # Strategy 1: Publisher-specific (e.g., ScienceDirect PII extraction)
+        # Strategy 1: Publisher-specific (e.g., ScienceDirect PII extraction, Springer direct URL)
         if publisher == 'elsevier':
             pdf_url = self._try_sciencedirect_direct(landing_url)
+            if pdf_url:
+                return pdf_url
+        elif publisher == 'springer':
+            pdf_url = self._try_springer_direct(landing_url)
             if pdf_url:
                 return pdf_url
         
@@ -354,6 +364,22 @@ class PDFLinkFinder:
             pii = match.group(1)
             pdf_url = f"https://www.sciencedirect.com/science/article/pii/{pii}/pdfft?isDTMRedir=true&download=true"
             logger.info(f"Constructed ScienceDirect PDF URL: {pdf_url}")
+            return pdf_url
+        return None
+    
+    def _try_springer_direct(self, url: str) -> Optional[str]:
+        """
+        Try Springer direct PDF URL construction.
+        
+        Pattern: https://link.springer.com/article/10.1007/s10468-021-10102-5
+        -> https://link.springer.com/content/pdf/10.1007/s10468-021-10102-5.pdf
+        """
+        # Match Springer article URLs: /article/{doi}
+        match = re.search(r'link\.springer\.com/article/([^/?]+)', url, re.IGNORECASE)
+        if match:
+            doi_part = match.group(1)
+            pdf_url = f"https://link.springer.com/content/pdf/{doi_part}.pdf"
+            logger.info(f"Constructed Springer PDF URL: {pdf_url}")
             return pdf_url
         return None
     
@@ -659,6 +685,15 @@ class DownloadManager:
             # Normal download
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
+            # Check response status and content-type before downloading
+            if response.status_code >= 400:
+                logger.warning(f"HTTP {response.status_code} response from {pdf_url}")
+                # Still try to download - might be PDF even with error status
+            
+            content_type = response.headers.get('content-type', '').lower()
+            if 'application/pdf' not in content_type and content_type:
+                logger.debug(f"Content-Type is '{content_type}' (not application/pdf) - will verify header")
+            
             # Write to temp file first
             with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                 tmp_path = Path(tmp_file.name)
@@ -669,7 +704,27 @@ class DownloadManager:
             # Verify PDF header
             header = tmp_path.read_bytes()[:4]
             if header != b'%PDF':
-                logger.error(f"Downloaded file is not a valid PDF (header: {header})")
+                # Read more of the file to see what we actually got
+                file_size = tmp_path.stat().st_size
+                preview = tmp_path.read_bytes()[:200]  # First 200 bytes
+                
+                # Try to decode as text to see if it's JSON/HTML/error message
+                try:
+                    preview_text = preview.decode('utf-8', errors='ignore')
+                    logger.error(f"Downloaded file is not a valid PDF (header: {header}, size: {file_size} bytes)")
+                    logger.error(f"Response preview: {preview_text[:150]}...")
+                    
+                    # Check if it's JSON (common for API error responses)
+                    if preview_text.strip().startswith('{'):
+                        try:
+                            import json
+                            error_data = json.loads(tmp_path.read_text()[:1000])
+                            logger.error(f"JSON error response: {error_data}")
+                        except:
+                            pass
+                except:
+                    logger.error(f"Downloaded file is not a valid PDF (header: {header}, size: {file_size} bytes, binary content)")
+                
                 tmp_path.unlink()
                 return False
             
@@ -1137,6 +1192,7 @@ class DownloadManager:
                         f.write(chunk)
             
             # Verify
+            # Verify it's actually a PDF
             header = output_path.read_bytes()[:4]
             if header == b'%PDF':
                 logger.info(f"Downloaded PDF via Selenium+requests: {output_path.stat().st_size} bytes")
@@ -1334,6 +1390,10 @@ class PDFFetcher:
         self._current_domain: Optional[str] = None
         self._domain_driver_initialized: Dict[str, bool] = {}
         
+        # Cloudflare domain tracking: postpone remaining requests from domains that hit Cloudflare
+        self._cloudflare_domains: set = set()  # Domains that have hit Cloudflare (for resource URLs)
+        self._cloudflare_doi_prefixes: set = set()  # DOI prefixes that have hit Cloudflare (e.g., '10.1103')
+        
         # Optional Crossref support (for direct PDF URL lookup)
         self.crossref_fetcher = None
         if CROSSREF_AVAILABLE and config.use_crossref:
@@ -1411,6 +1471,12 @@ class PDFFetcher:
         
         driver = webdriver.Chrome(options=options)
         
+        # Set timeouts to prevent long waits
+        # Use config timeout or default to 30 seconds
+        selenium_timeout = getattr(self.config, 'selenium_timeout', 30)
+        driver.set_page_load_timeout(selenium_timeout)
+        driver.implicitly_wait(5)  # Shorter implicit wait for element finding
+        
         # Enable downloads via CDP
         driver.execute_cdp_cmd('Page.setDownloadBehavior', {
             'behavior': 'allow',
@@ -1418,6 +1484,25 @@ class PDFFetcher:
         })
         
         return driver
+    
+    @contextmanager
+    def _suppress_cloudflare_logging(self):
+        """Context manager to suppress Cloudflare warning logs during retries.
+        
+        Cloudflare challenges are already logged during initial attempts,
+        so we suppress redundant warnings during retries.
+        """
+        # Store original logger level
+        original_level = logger.level
+        
+        try:
+            # Temporarily raise logger level to ERROR to suppress WARNING messages
+            # (Cloudflare warnings are at WARNING level)
+            logger.setLevel(logging.ERROR)
+            yield
+        finally:
+            # Restore original logging level
+            logger.setLevel(original_level)
     
     def _is_cloudflare_challenge(self, driver) -> bool:
         """Check if current page is a Cloudflare challenge.
@@ -1559,6 +1644,7 @@ class PDFFetcher:
     def _predict_domain_from_doi(self, doi: str) -> Optional[str]:
         """Predict domain from DOI prefix (heuristic)."""
         # Common DOI prefixes and their domains
+        # Use actual domains as they appear in URLs (with subdomains)
         doi_prefixes = {
             '10.1016': 'sciencedirect.com',  # Elsevier
             '10.1038': 'nature.com',  # Nature
@@ -1568,7 +1654,7 @@ class PDFFetcher:
             '10.1007': 'link.springer.com',  # Springer
             '10.1111': 'onlinelibrary.wiley.com',  # Wiley
             '10.1093': 'academic.oup.com',  # Oxford
-            '10.1103': 'aps.org',  # American Physical Society
+            '10.1103': 'link.aps.org',  # American Physical Society (use actual domain)
         }
         
         for prefix, domain in doi_prefixes.items():
@@ -1576,6 +1662,76 @@ class PDFFetcher:
                 return domain
         
         return None
+    
+    def _extract_doi_prefix(self, doi: str) -> Optional[str]:
+        """
+        Extract DOI prefix (e.g., '10.1103' from '10.1103/PhysRevResearch.4.043131').
+        
+        Args:
+            doi: Full DOI string
+            
+        Returns:
+            DOI prefix (e.g., '10.1103') or None if not a valid DOI
+        """
+        if not doi or not doi.startswith('10.'):
+            return None
+        
+        # DOI format: 10.xxxx/...
+        # Extract everything before the first slash
+        parts = doi.split('/', 1)
+        if len(parts) >= 1:
+            prefix = parts[0].strip()
+            # Validate it looks like a DOI prefix (starts with 10. and has at least one more part)
+            if prefix.startswith('10.') and len(prefix) > 3:
+                return prefix
+        
+        return None
+    
+    def _normalize_domain_for_matching(self, domain: str) -> str:
+        """
+        Normalize domain for matching (handle subdomain differences).
+        
+        Examples:
+            'link.aps.org' -> 'aps.org'
+            'www.example.com' -> 'example.com'
+            'sciencedirect.com' -> 'sciencedirect.com'
+        """
+        domain = domain.lower().strip()
+        # Remove 'www.' prefix
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        
+        # For known subdomain patterns, extract base domain
+        parts = domain.split('.')
+        if len(parts) >= 3:
+            # Common subdomain prefixes to strip
+            subdomain_prefixes = ['link', 'www', 'pubs', 'onlinelibrary']
+            if parts[0] in subdomain_prefixes:
+                return '.'.join(parts[1:])  # Return base domain
+        
+        return domain
+    
+    def _domains_match(self, domain1: str, domain2: str) -> bool:
+        """
+        Check if two domains match (handling subdomain differences).
+        
+        Examples:
+            'aps.org' matches 'link.aps.org' -> True
+            'link.aps.org' matches 'aps.org' -> True
+            'sciencedirect.com' matches 'sciencedirect.com' -> True
+        """
+        norm1 = self._normalize_domain_for_matching(domain1)
+        norm2 = self._normalize_domain_for_matching(domain2)
+        
+        # Exact match after normalization
+        if norm1 == norm2:
+            return True
+        
+        # Check if one is a subdomain of the other
+        if domain1.endswith('.' + norm2) or domain2.endswith('.' + norm1):
+            return True
+        
+        return False
     
     def _cleanup_domain_drivers(self):
         """Clean up all domain-specific drivers."""
@@ -1788,16 +1944,33 @@ class PDFFetcher:
                 # Use domain-specific driver for session persistence
                 driver = self._get_driver(domain=domain)
                 self._current_domain = domain  # Track current domain
-                driver.get(landing_url)
+                try:
+                    driver.get(landing_url)
+                except TimeoutException as e:
+                    # Catch timeout during page load and handle gracefully
+                    # This will be caught again in the outer try/except, but we want to log it cleanly here
+                    logger.warning(f"Page load timeout for {identifier} at {landing_url}")
+                    raise  # Re-raise to be handled by outer exception handler
                 time.sleep(2)  # Wait for page load
                 
                 # Check for Cloudflare challenge - if detected, log and skip
                 if self._is_cloudflare_challenge(driver):
+                    # Mark this domain/DOI prefix as having hit Cloudflare
+                    self._cloudflare_domains.add(domain)
+                    
+                    # If this is a DOI, also mark the DOI prefix
+                    if kind in ('doi', 'doi_url') and doi:
+                        doi_prefix = self._extract_doi_prefix(doi)
+                        if doi_prefix:
+                            self._cloudflare_doi_prefixes.add(doi_prefix)
+                            logger.warning(f"DOI prefix '{doi_prefix}' marked - remaining DOIs with this prefix will be postponed")
+                    
                     logger.warning("=" * 60)
                     logger.warning("CLOUDFLARE CHALLENGE DETECTED - SKIPPING")
                     logger.warning(f"Identifier: {identifier}")
                     logger.warning(f"Resource URL: {landing_url}")
                     logger.warning(f"Publisher: {publisher or 'unknown'}")
+                    logger.warning(f"Domain '{domain}' marked - remaining requests from this domain will be postponed")
                     logger.warning("=" * 60)
                     
                     result.status = DownloadStatus.FAILURE
@@ -1875,10 +2048,100 @@ class PDFFetcher:
             self.metadata_store.update(result)
             return result
             
+        except (TimeoutError, TimeoutException) as e:
+            # Handle Selenium/WebDriver timeouts gracefully
+            # Get full error message - TimeoutException.msg contains the actual message
+            # The error format is: "Message: timeout: Timed out receiving message from renderer: 29.596"
+            timeout_msg = str(e)
+            if hasattr(e, 'msg') and e.msg:
+                timeout_msg = str(e.msg)
+            # Also check the full exception representation for additional context
+            full_msg = f"{timeout_msg} {repr(e)}".lower()
+            timeout_msg_lower = timeout_msg.lower()
+            
+            selenium_timeout = getattr(self.config, 'selenium_timeout', 30)
+            
+            # Detect different types of timeouts (check multiple sources)
+            # TimeoutException message format: "Message: timeout: Timed out receiving message from renderer: 29.596"
+            # The message might be in e.msg, str(e), or the full exception representation
+            renderer_indicators = [
+                'receiving message from renderer',
+                'timed out receiving message',
+                'renderer timeout',
+            ]
+            # Check all possible message sources
+            all_msg_sources = [timeout_msg_lower, full_msg]
+            if hasattr(e, 'msg') and e.msg:
+                all_msg_sources.append(str(e.msg).lower())
+            
+            is_renderer_timeout = any(
+                any(indicator in msg_source for msg_source in all_msg_sources)
+                for indicator in renderer_indicators
+            )
+            
+            if is_renderer_timeout:
+                # Chrome renderer timeout - page is stuck or taking too long to render
+                result.status = DownloadStatus.FAILURE
+                result.error_reason = (
+                    f"Chrome renderer timeout ({selenium_timeout}s) - page took too long to render. "
+                    f"This often happens with slow-loading or JavaScript-heavy pages. "
+                    f"Try increasing 'selenium_timeout' in config."
+                )
+                # Log without traceback for cleaner output
+                logger.warning(f"Renderer timeout for {identifier}: {result.error_reason}")
+            elif 'localhost' in timeout_msg or 'port' in timeout_msg or 'HTTPConnectionPool' in timeout_msg:
+                # This is a Selenium WebDriver timeout (connection to ChromeDriver)
+                result.status = DownloadStatus.FAILURE
+                result.error_reason = (
+                    f"Selenium connection timeout ({selenium_timeout}s) - browser took too long to respond. "
+                    f"Try increasing 'selenium_timeout' in config or check if Chrome/ChromeDriver is working."
+                )
+                logger.warning(f"Connection timeout for {identifier}: {result.error_reason}")
+            elif 'page load' in timeout_msg.lower() or ('timeout' in timeout_msg.lower() and 'page' in timeout_msg.lower()):
+                # Generic page load timeout
+                result.status = DownloadStatus.FAILURE
+                result.error_reason = (
+                    f"Page load timeout ({selenium_timeout}s) - page took too long to load. "
+                    f"Try increasing 'selenium_timeout' in config or check if the page is accessible."
+                )
+                logger.warning(f"Page load timeout for {identifier}: {result.error_reason}")
+            else:
+                # Generic timeout - check if it's a renderer timeout by checking the message more carefully
+                # The error message format is "Message: timeout: Timed out receiving message from renderer: 29.596"
+                if 'renderer' in full_msg or 'Timed out receiving message' in timeout_msg:
+                    result.status = DownloadStatus.FAILURE
+                    result.error_reason = (
+                        f"Chrome renderer timeout ({selenium_timeout}s) - page took too long to render. "
+                        f"Try increasing 'selenium_timeout' in config."
+                    )
+                    logger.warning(f"Renderer timeout for {identifier}: {result.error_reason}")
+                else:
+                    # Generic timeout - truncate to avoid long stacktraces
+                    result.status = DownloadStatus.FAILURE
+                    # Extract just the message part, not the full exception
+                    clean_msg = timeout_msg.split('\n')[0][:200]  # First line, max 200 chars
+                    result.error_reason = f"Timeout error: {clean_msg}"
+                    logger.warning(f"Timeout for {identifier}: {clean_msg}")
+            self.metadata_store.update(result)
+            return result
         except Exception as e:
-            logger.error(f"Error downloading PDF: {e}", exc_info=True)
-            result.status = DownloadStatus.FAILURE
-            result.error_reason = str(e)
+            # Check if it's a urllib3 ReadTimeoutError (Selenium connection timeout)
+            error_str = str(e)
+            error_type = type(e).__name__
+            if (Urllib3ReadTimeoutError and isinstance(e, Urllib3ReadTimeoutError)) or \
+               ('ReadTimeoutError' in error_type) or \
+               ('HTTPConnectionPool' in error_str and 'localhost' in error_str and 'Read timed out' in error_str):
+                selenium_timeout = getattr(self.config, 'selenium_timeout', 30)
+                result.status = DownloadStatus.FAILURE
+                result.error_reason = (
+                    f"Selenium connection timeout ({selenium_timeout}s) - browser took too long to respond. "
+                    f"Try increasing 'selenium_timeout' in config or check if Chrome/ChromeDriver is working."
+                )
+                logger.warning(f"Selenium timeout for {identifier}: {result.error_reason}")
+            else:
+                logger.error(f"Error downloading PDF: {e}", exc_info=True)
+                result.status = DownloadStatus.FAILURE
+                result.error_reason = str(e)
             self.metadata_store.update(result)
             return result
     
@@ -1965,10 +2228,24 @@ class PDFFetcher:
         if sort_by_domain:
             logger.info("Session persistence enabled: reusing drivers for same-domain requests")
         
+        # Track postponed identifiers (from domains that hit Cloudflare)
+        postponed_identifiers: List[str] = []
+        
         # Setup progress bar
         pbar = None
         if progress and TQDM_AVAILABLE:
-            pbar = tqdm(total=total, desc="Downloading PDFs", unit="PDF")
+            # Configure tqdm for Jupyter notebooks
+            pbar = tqdm(
+                total=total, 
+                desc="Downloading PDFs", 
+                unit="PDF",
+                file=sys.stdout,  # Ensure output goes to stdout
+                dynamic_ncols=True,  # Better for notebooks
+                mininterval=0.5,  # Update at least every 0.5 seconds
+                maxinterval=1.0,  # But no more than every 1 second
+            )
+            sys.stdout.flush()  # Initial flush
+            sys.stdout.flush()  # Initial flush
         elif progress and not TQDM_AVAILABLE:
             logger.warning("tqdm not available - install with 'pip install tqdm' for progress bars")
         
@@ -1976,6 +2253,8 @@ class PDFFetcher:
             # Process in batches
             current_domain = None
             for batch_start in range(0, total, batch_size):
+                # Check for interruption at batch boundaries
+                # This allows cleaner interruption between batches
                 batch_end = min(batch_start + batch_size, total)
                 batch = sorted_identifiers[batch_start:batch_end]
                 batch_num = (batch_start // batch_size) + 1
@@ -1983,34 +2262,92 @@ class PDFFetcher:
                 
                 if pbar:
                     pbar.set_description(f"Batch {batch_num}/{total_batches}")
+                    pbar.refresh()
+                    sys.stdout.flush()
                 else:
                     logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} items)")
+                
+                # Force flush logs in notebooks
+                sys.stdout.flush()
+                sys.stderr.flush()
                 
                 for i, identifier in enumerate(batch, 1):
                     # Track domain changes for logging and delay optimization
                     domain_changed = False
                     previous_domain = current_domain
+                    identifier_domain = None
                     
-                    # Try to detect domain before download (for resource URLs)
+                    # Check for postponement before download
                     try:
                         kind, doi, url = IdentifierNormalizer.normalize(identifier)
-                        if kind == 'resource_url':
-                            domain = urlparse(url).netloc
-                            if domain != current_domain:
-                                previous_domain = current_domain
-                                current_domain = domain
-                                domain_changed = True
+                        
+                        # For DOIs: Check if DOI prefix has hit Cloudflare
+                        # Use prefix + '/' to avoid false matches (e.g., 10.1103 shouldn't match 10.11035)
+                        if kind in ('doi', 'doi_url') and doi:
+                            should_postpone_doi = False
+                            matching_prefix = None
+                            for postponed_prefix in self._cloudflare_doi_prefixes:
+                                # Check if DOI starts with prefix followed by '/' (exact prefix match)
+                                if doi.startswith(postponed_prefix + '/'):
+                                    should_postpone_doi = True
+                                    matching_prefix = postponed_prefix
+                                    break  # Found matching prefix, no need to check others
+                            
+                            if should_postpone_doi:
+                                postponed_identifiers.append(identifier)
                                 if pbar:
-                                    pbar.set_postfix_str(f"Domain: {domain}")
+                                    pbar.set_postfix_str(f"Postponed (Cloudflare): {matching_prefix}")
                                 else:
-                                    logger.info(f"Switching to domain: {domain}")
+                                    logger.info(f"Postponing {identifier} - DOI prefix '{matching_prefix}' hit Cloudflare")
+                                if pbar:
+                                    pbar.update(1)
+                                continue  # Skip this identifier for now
+                        
+                        # For resource URLs: Check if domain has hit Cloudflare
+                        elif kind == 'resource_url':
+                            identifier_domain = urlparse(url).netloc
+                            should_postpone = False
+                            for cloudflare_domain in self._cloudflare_domains:
+                                if self._domains_match(identifier_domain, cloudflare_domain):
+                                    should_postpone = True
+                                    break
+                            
+                            if should_postpone:
+                                postponed_identifiers.append(identifier)
+                                if pbar:
+                                    pbar.set_postfix_str(f"Postponed (Cloudflare): {identifier_domain}")
+                                else:
+                                    logger.info(f"Postponing {identifier} - domain '{identifier_domain}' matches Cloudflare domain")
+                                if pbar:
+                                    pbar.update(1)
+                                continue  # Skip this identifier for now
+                        
+                        # Track domain for delay optimization (predict domain from DOI if needed)
+                        if kind in ('doi', 'doi_url') and doi:
+                            identifier_domain = self._predict_domain_from_doi(doi)
+                        elif kind == 'resource_url':
+                            identifier_domain = urlparse(url).netloc
+                        
+                        if identifier_domain and identifier_domain != current_domain:
+                            previous_domain = current_domain
+                            current_domain = identifier_domain
+                            domain_changed = True
+                            if pbar:
+                                pbar.set_postfix_str(f"Domain: {identifier_domain}")
+                            else:
+                                logger.info(f"Switching to domain: {identifier_domain}")
                     except:
                         pass
                     
                     if pbar:
                         pbar.set_postfix_str(f"Downloading: {identifier[:50]}...")
+                        pbar.refresh()  # Force refresh in notebooks
+                        sys.stdout.flush()  # Force flush for Jupyter notebooks
                     else:
                         logger.info(f"[{batch_start + i}/{total}] Downloading: {identifier}")
+                        # Force flush for Jupyter notebooks
+                        sys.stdout.flush()
+                        sys.stderr.flush()
                     
                     # Track if we used Crossref (for delay optimization)
                     used_crossref = False
@@ -2019,8 +2356,27 @@ class PDFFetcher:
                         if doi in self._crossref_pdf_cache and self._crossref_pdf_cache[doi]:
                             used_crossref = True
                     
-                    result = self.download(identifier)
+                    # Download (this can take a while, especially with Selenium)
+                    # Wrap in try/except to catch KeyboardInterrupt during download
+                    try:
+                        result = self.download(identifier)
+                    except KeyboardInterrupt:
+                        logger.warning(f"Download interrupted for {identifier}")
+                        logger.warning("Cleaning up Selenium drivers...")
+                        self._cleanup_domain_drivers()
+                        if pbar:
+                            pbar.close()
+                        raise  # Re-raise to stop batch processing
+                    
+                    # Flush immediately after download to show progress
+                    if pbar:
+                        sys.stdout.flush()
                     results.append(result)
+                    
+                    # Update domain from result if we didn't know it before
+                    if result.landing_url and not identifier_domain:
+                        identifier_domain = urlparse(result.landing_url).netloc
+                        # If this domain hit Cloudflare during download, it's already marked
                     
                     # Update used_crossref flag from result if available
                     # (We'll check this in the delay logic below)
@@ -2045,6 +2401,8 @@ class PDFFetcher:
                         }.get(result.status, "?")
                         pbar.set_postfix_str(f"{status_emoji} {result.status.value}")
                         pbar.update(1)
+                        pbar.refresh()  # Force refresh
+                        sys.stdout.flush()  # Force flush for Jupyter notebooks
                     
                     # Delay between requests within batch
                     # OPTIMIZATION: Zero delay if:
@@ -2097,38 +2455,181 @@ class PDFFetcher:
                             logger.info(f"Batch {batch_num} complete. Waiting {self.delay_between_batches}s before next batch...")
                         time.sleep(self.delay_between_batches)
             
+            # Process postponed identifiers (from domains that hit Cloudflare)
+            if postponed_identifiers:
+                logger.info(f"Processing {len(postponed_identifiers)} postponed identifiers from Cloudflare-protected domains...")
+                logger.info(f"Postponed domains: {sorted(self._cloudflare_domains)}")
+                if self._cloudflare_doi_prefixes:
+                    logger.info(f"Postponed DOI prefixes: {sorted(self._cloudflare_doi_prefixes)}")
+                
+                # Wait a bit before processing postponed items (give Cloudflare time to cool down)
+                wait_time = self.delay_between_batches * 3  # Longer wait for postponed items
+                logger.info(f"Waiting {wait_time}s before processing postponed items...")
+                # Add periodic heartbeat during long wait
+                elapsed = 0
+                while elapsed < wait_time:
+                    sleep_chunk = min(5, wait_time - elapsed)  # Check every 5 seconds
+                    time.sleep(sleep_chunk)
+                    elapsed += sleep_chunk
+                    remaining = wait_time - elapsed
+                    if remaining > 0:
+                        logger.info(f"Still waiting... {remaining:.0f}s remaining")
+                
+                # Create progress bar for postponed items
+                postponed_pbar = None
+                if progress and TQDM_AVAILABLE:
+                    postponed_pbar = tqdm(
+                        total=len(postponed_identifiers),
+                        desc=f"Processing {len(postponed_identifiers)} postponed",
+                        unit="PDF",
+                        leave=True
+                    )
+                
+                try:
+                    for i, identifier in enumerate(postponed_identifiers, 1):
+                        if postponed_pbar:
+                            postponed_pbar.set_postfix_str(f"{i}/{len(postponed_identifiers)}: {identifier[:40]}...")
+                        else:
+                            logger.info(f"Processing postponed {i}/{len(postponed_identifiers)}: {identifier}")
+                        
+                        # Try to download with longer delays
+                        result = self.download(identifier)
+                        results.append(result)
+                        
+                        if postponed_pbar:
+                            status_emoji = {
+                                DownloadStatus.SUCCESS: "✓",
+                                DownloadStatus.FAILURE: "✗",
+                                DownloadStatus.PAYWALL: "🔒",
+                            }.get(result.status, "?")
+                            postponed_pbar.set_postfix_str(f"{status_emoji} {result.status.value}")
+                            postponed_pbar.update(1)
+                        
+                        # Longer delay for postponed items (they're from problematic domains)
+                        time.sleep(self.delay_between_requests * 3)
+                finally:
+                    if postponed_pbar:
+                        postponed_pbar.close()
+                
+                logger.info(f"Completed processing {len(postponed_identifiers)} postponed identifiers")
+            
             # Retry failures if requested
             if retry_failures:
-                failures = [r for r in results if r.status == DownloadStatus.FAILURE]
+                # Include failures from both main batch and postponed items
+                # Only retry actual failures, not paywalls or invalid identifiers
+                failures = [
+                    r for r in results 
+                    if r.status == DownloadStatus.FAILURE 
+                    and r.error_reason  # Make sure it has an error reason
+                ]
+                
+                # Debug: Log status breakdown
+                status_breakdown = {}
+                for r in results:
+                    status_breakdown[r.status.value] = status_breakdown.get(r.status.value, 0) + 1
+                logger.info(f"Results status breakdown: {status_breakdown}")
+                logger.info(f"Found {len(failures)} failures to retry (out of {len(results)} total results)")
+                
+                # Log some example failure reasons
                 if failures:
-                    if pbar:
-                        pbar.set_description(f"Retrying {len(failures)} failures")
-                        pbar.set_postfix_str("")
+                    logger.info(f"Retry enabled: Will retry {len(failures)} failed downloads")
+                    example_errors = [r.error_reason[:100] for r in failures[:3]]
+                    logger.info(f"Example failure reasons: {example_errors}")
+                    # Create a separate progress bar for retries
+                    retry_pbar = None
+                    if progress and TQDM_AVAILABLE:
+                        retry_pbar = tqdm(
+                            total=len(failures),
+                            desc=f"Retrying {len(failures)} failures",
+                            unit="retry",
+                            leave=True  # Keep retry bar visible after completion
+                        )
                     else:
                         logger.info(f"Retrying {len(failures)} failed downloads with longer delays...")
+                    
                     time.sleep(self.delay_between_batches * 2)  # Longer delay before retries
                     
-                    for result in failures:
-                        if pbar:
-                            pbar.set_postfix_str(f"Retrying: {result.identifier[:50]}...")
-                        else:
-                            logger.info(f"Retrying: {result.identifier}")
-                        retry_result = self.download(result.identifier)
-                        # Update the original result
-                        result.status = retry_result.status
-                        result.error_reason = retry_result.error_reason
-                        result.pdf_path = retry_result.pdf_path
-                        result.last_successful = retry_result.last_successful
-                        if pbar:
-                            pbar.update(0)  # Update without incrementing total
-                        time.sleep(self.delay_between_requests * 2)  # Longer delay for retries
+                    try:
+                        for i, result in enumerate(failures, 1):
+                            logger.info(f"Retry {i}/{len(failures)}: {result.identifier} (original error: {result.error_reason})")
+                            if retry_pbar:
+                                retry_pbar.set_postfix_str(f"{i}/{len(failures)}: {result.identifier[:40]}...")
+                                retry_pbar.refresh()  # Force refresh before download
+                            
+                            # Temporarily suppress Cloudflare logging during retries
+                            # (Cloudflare was already logged during initial attempt)
+                            with self._suppress_cloudflare_logging():
+                                retry_result = self.download(result.identifier)
+                            
+                            logger.info(f"Retry {i}/{len(failures)} result: {result.identifier} -> {retry_result.status.value}")
+                            if retry_result.status == DownloadStatus.SUCCESS:
+                                logger.info(f"✓ Retry succeeded for {result.identifier}")
+                            else:
+                                logger.info(f"✗ Retry still failed for {result.identifier}: {retry_result.error_reason}")
+                            
+                            # Update the original result
+                            result.status = retry_result.status
+                            result.error_reason = retry_result.error_reason
+                            result.pdf_path = retry_result.pdf_path
+                            result.last_successful = retry_result.last_successful
+                            
+                            if retry_pbar:
+                                # Use retry_result.status (the new status from the retry attempt)
+                                status_emoji = {
+                                    DownloadStatus.SUCCESS: "✓",
+                                    DownloadStatus.FAILURE: "✗",
+                                    DownloadStatus.PAYWALL: "🔒",
+                                }.get(retry_result.status, "?")
+                                retry_pbar.set_postfix_str(f"{status_emoji} {retry_result.status.value}")
+                                retry_pbar.update(1)
+                                retry_pbar.refresh()  # Force refresh in notebooks
+                                # Force stdout flush for Jupyter
+                                sys.stdout.flush()
+                            
+                            time.sleep(self.delay_between_requests * 2)  # Longer delay for retries
+                    finally:
+                        if retry_pbar:
+                            retry_pbar.close()
+                    
+                    # Log retry summary (check updated status after all retries)
+                    retry_successes = sum(1 for r in failures if r.status == DownloadStatus.SUCCESS)
+                    retry_failures = sum(1 for r in failures if r.status == DownloadStatus.FAILURE)
+                    retry_paywalls = sum(1 for r in failures if r.status == DownloadStatus.PAYWALL)
+                    logger.info(f"Retry summary: {retry_successes} succeeded, {retry_failures} still failed, {retry_paywalls} paywalled")
+                    
+                    # Log some example failure reasons for still-failed items
+                    if retry_failures > 0:
+                        still_failed = [r for r in failures if r.status == DownloadStatus.FAILURE]
+                        example_errors = [r.error_reason[:100] if r.error_reason else "No error reason" for r in still_failed[:5]]
+                        logger.info(f"Example retry failure reasons: {example_errors}")
+                else:
+                    logger.info("No failures to retry")
+            else:
+                logger.info("Retry disabled (retry_failures=False)")
             
             # Clean up domain-specific drivers
             self._cleanup_domain_drivers()
         
-        finally:
+        except KeyboardInterrupt:
+            logger.warning("=" * 60)
+            logger.warning("INTERRUPTED BY USER (KeyboardInterrupt)")
+            logger.warning("=" * 60)
+            logger.warning("Cleaning up resources (Selenium drivers, etc.)...")
+            # Clean up all drivers immediately
+            self._cleanup_domain_drivers()
             if pbar:
                 pbar.close()
+            logger.warning("Cleanup complete. Execution stopped.")
+            # Re-raise to properly stop execution
+            raise
+        finally:
+            # Always clean up progress bar
+            if pbar:
+                pbar.close()
+            # Note: We don't close drivers in finally because:
+            # 1. If interrupted, we want to clean up immediately (done in except)
+            # 2. If normal completion, drivers should remain open for potential reuse
+            # 3. User should call fetcher.close() explicitly or use context manager
         
         # Summary
         success_count = sum(1 for r in results if r.status == DownloadStatus.SUCCESS)
