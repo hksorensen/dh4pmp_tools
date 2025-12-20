@@ -40,7 +40,7 @@ class Stage:
     depends_on: List[str] = field(default_factory=list)
     enabled: bool = True
     checkpoint: bool = True
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: Any = field(default_factory=dict)  # Can be Dict[str, Any] or PipelineConfig object
     status: StageStatus = StageStatus.PENDING
     
     def __post_init__(self):
@@ -132,7 +132,14 @@ class StageOrchestrator:
         """
         execution_groups = []
         completed = set()
-        remaining = set(self.stages.keys())
+        # Mark disabled stages as "completed" for dependency resolution
+        # (they won't run, but other stages can depend on them)
+        for name, stage in self.stages.items():
+            if not stage.enabled:
+                completed.add(name)
+        
+        # Only include enabled stages in execution order
+        remaining = {name for name in self.stages.keys() if self.stages[name].enabled}
         
         while remaining:
             # Find stages that can run now (all dependencies completed)
@@ -143,6 +150,17 @@ class StageOrchestrator:
             
             if not ready:
                 # Circular dependency or missing dependency
+                # Check if any remaining stages have dependencies on disabled stages
+                remaining_with_deps = {
+                    name for name in remaining
+                    if self.stages[name].depends_on
+                }
+                if remaining_with_deps:
+                    raise ValueError(
+                        f"Cannot resolve execution order. Remaining stages: {remaining}. "
+                        f"Stages with unresolved dependencies: {remaining_with_deps}"
+                    )
+                # If no stages have dependencies, something else is wrong
                 raise ValueError(f"Cannot resolve execution order. Remaining stages: {remaining}")
             
             execution_groups.append(ready)
@@ -203,7 +221,12 @@ class StageOrchestrator:
                         result = run_stage(stage)
                     elif stage.pipeline_class:
                         # Instantiate and run pipeline
-                        pipeline = stage.pipeline_class(**stage.config)
+                        # Handle both dict and PipelineConfig objects
+                        if isinstance(stage.config, dict):
+                            pipeline = stage.pipeline_class(**stage.config)
+                        else:
+                            # It's a PipelineConfig object, pass it directly
+                            pipeline = stage.pipeline_class(stage.config)
                         result = pipeline.run()
                     else:
                         raise ValueError(f"Stage '{stage_name}' has no pipeline_class or run_stage function")
