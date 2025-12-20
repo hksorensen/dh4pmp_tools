@@ -367,22 +367,6 @@ class PDFLinkFinder:
             return pdf_url
         return None
     
-    def _try_springer_direct(self, url: str) -> Optional[str]:
-        """
-        Try Springer direct PDF URL construction.
-        
-        Pattern: https://link.springer.com/article/10.1007/s10468-021-10102-5
-        -> https://link.springer.com/content/pdf/10.1007/s10468-021-10102-5.pdf
-        """
-        # Match Springer article URLs: /article/{doi}
-        match = re.search(r'link\.springer\.com/article/([^/?]+)', url, re.IGNORECASE)
-        if match:
-            doi_part = match.group(1)
-            pdf_url = f"https://link.springer.com/content/pdf/{doi_part}.pdf"
-            logger.info(f"Constructed Springer PDF URL: {pdf_url}")
-            return pdf_url
-        return None
-    
     def _find_direct_links(self, url: str) -> Optional[str]:
         """Find direct PDF links."""
         try:
@@ -419,7 +403,7 @@ class PDFLinkFinder:
             # Find all clickable elements
             elements = self.driver.find_elements(By.XPATH, "//button | //a | //*[@role='button']")
             
-            button_texts = ['download pdf', 'view pdf', 'pdf', 'download', 'get pdf']
+            button_texts = ['download pdf', 'view pdf', 'pdf', 'download', 'get pdf', 'article']
             
             for element in elements:
                 try:
@@ -653,6 +637,14 @@ class DownloadManager:
                 headers=headers
             )
             
+            # Early detection: Check Content-Type header before downloading full file
+            content_type = response.headers.get('content-type', '').lower()
+            is_html_content_type = (
+                'text/html' in content_type or 
+                'application/xhtml' in content_type or
+                'text/xml' in content_type
+            )
+            
             # Handle error status codes that might still contain PDF
             if response.status_code >= 400:
                 logger.warning(f"Got HTTP {response.status_code}, checking if response is PDF...")
@@ -676,11 +668,35 @@ class DownloadManager:
                 tmp_path.unlink()
                 
                 if selenium_driver and response.status_code in (403, 401):
+                    # Explicit logging for ams.org 403 errors
+                    if 'ams.org' in pdf_url.lower():
+                        logger.warning("🔴 AMS.ORG - Got 403 in DownloadManager, trying Selenium fallback...")
+                        logger.warning(f"   PDF URL: {pdf_url}")
                     logger.info(f"Trying Selenium fallback for {response.status_code} response...")
-                    return self._download_with_selenium(pdf_url, output_path, selenium_driver, referer)
+                    selenium_result = self._download_with_selenium(pdf_url, output_path, selenium_driver, referer)
+                    # If Selenium also fails, raise an error with 403 info so it can be marked for postponement
+                    if not selenium_result and response.status_code == 403:
+                        if 'ams.org' in pdf_url.lower():
+                            logger.warning("🔴 AMS.ORG - Selenium fallback also failed with 403, raising error...")
+                        raise requests.HTTPError(f"403 Client Error: Forbidden for url: {pdf_url}", response=response)
+                    return selenium_result
                 
-                # If no Selenium or not 403/401, raise error
+                # If no Selenium or not 403/401, raise error (this includes 403 when no Selenium fallback)
                 response.raise_for_status()
+            
+            # Early HTML detection: If Content-Type indicates HTML, try to peek at content before full download
+            if is_html_content_type:
+                logger.warning(f"URL returned HTML content-type '{content_type}' instead of PDF - likely wrong URL")
+                # Read just enough to confirm it's HTML (first chunk)
+                first_chunk = next(response.iter_content(chunk_size=512), b'')
+                if first_chunk.startswith(b'<!') or b'<!DOCTYPE' in first_chunk or b'<html' in first_chunk.lower():
+                    logger.error(f"Confirmed HTML response from {pdf_url[:100]}... (Content-Type: {content_type})")
+                    # Try Selenium fallback if available (might be a redirect or dynamic page)
+                    if selenium_driver:
+                        logger.info("Trying Selenium fallback for HTML response...")
+                        return self._download_with_selenium(pdf_url, output_path, selenium_driver, referer)
+                    return False
+                # If first chunk doesn't look like HTML, continue (might be mislabeled)
             
             # Normal download
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -690,8 +706,7 @@ class DownloadManager:
                 logger.warning(f"HTTP {response.status_code} response from {pdf_url}")
                 # Still try to download - might be PDF even with error status
             
-            content_type = response.headers.get('content-type', '').lower()
-            if 'application/pdf' not in content_type and content_type:
+            if 'application/pdf' not in content_type and content_type and not is_html_content_type:
                 logger.debug(f"Content-Type is '{content_type}' (not application/pdf) - will verify header")
             
             # Write to temp file first
@@ -711,19 +726,31 @@ class DownloadManager:
                 # Try to decode as text to see if it's JSON/HTML/error message
                 try:
                     preview_text = preview.decode('utf-8', errors='ignore')
-                    logger.error(f"Downloaded file is not a valid PDF (header: {header}, size: {file_size} bytes)")
-                    logger.error(f"Response preview: {preview_text[:150]}...")
+                    
+                    # Determine if this is expected (HTML) vs unexpected (other errors)
+                    is_html = preview_text.strip().startswith('<!') or '<html' in preview_text.lower() or '<!DOCTYPE' in preview_text
+                    
+                    # Use WARNING for expected HTML responses, ERROR for unexpected issues
+                    log_level = logger.warning if is_html else logger.error
+                    log_level(f"Downloaded file is not a valid PDF (header: {header}, size: {file_size} bytes)")
+                    
+                    if is_html:
+                        # HTML responses are common (wrong URL, redirect page, etc.) - less verbose
+                        logger.debug(f"HTML response preview: {preview_text[:150]}...")
+                    else:
+                        # Unexpected content - more verbose
+                        logger.error(f"Response preview: {preview_text[:150]}...")
                     
                     # Check if it's JSON (common for API error responses)
                     if preview_text.strip().startswith('{'):
                         try:
                             import json
                             error_data = json.loads(tmp_path.read_text()[:1000])
-                            logger.error(f"JSON error response: {error_data}")
+                            logger.warning(f"JSON error response: {error_data}")
                         except:
                             pass
                 except:
-                    logger.error(f"Downloaded file is not a valid PDF (header: {header}, size: {file_size} bytes, binary content)")
+                    logger.warning(f"Downloaded file is not a valid PDF (header: {header}, size: {file_size} bytes, binary content)")
                 
                 tmp_path.unlink()
                 return False
@@ -1203,6 +1230,22 @@ class DownloadManager:
                 return False
             
         except Exception as e:
+            error_msg = str(e)
+            # Explicit logging for ams.org errors in Selenium download
+            # Check error message and current_url (which was set earlier in the method)
+            try:
+                current_url = driver.current_url if 'driver' in locals() else None
+                is_ams_error = 'ams.org' in error_msg.lower() or (current_url and 'ams.org' in current_url.lower())
+                if is_ams_error:
+                    logger.warning("🔴 AMS.ORG - Failed to save PDF from Selenium")
+                    if current_url:
+                        logger.warning(f"   Current URL: {current_url}")
+                    logger.warning(f"   Error: {error_msg[:300]}")
+            except:
+                # If we can't get current_url, just check error message
+                if 'ams.org' in error_msg.lower():
+                    logger.warning("🔴 AMS.ORG - Failed to save PDF from Selenium")
+                    logger.warning(f"   Error: {error_msg[:300]}")
             logger.error(f"Failed to save PDF from Selenium: {e}")
             if output_path.exists():
                 output_path.unlink()
@@ -1272,6 +1315,11 @@ class MetadataStore:
         self._save()
 
 
+# Module-level flag to track if we've already logged initialization messages
+# (prevents duplicate logs when multiple PDFFetcher instances are created in parallel)
+_initialization_logged = False
+
+
 class PDFFetcher:
     """
     Main PDF fetcher class following the specification.
@@ -1319,9 +1367,13 @@ class PDFFetcher:
             console_level=logging.INFO,
             file_level=logging.DEBUG
         )
-        self.logger.info(f"PDF Fetcher v{__version__} initialized")
-        self.logger.info(f"PDF directory: {config.pdf_dir}")
-        self.logger.info(f"Log directory: {config.log_dir}")
+        # Only log initialization messages once (avoid duplicates in parallel processing)
+        global _initialization_logged
+        if not _initialization_logged:
+            self.logger.info(f"PDF Fetcher v{__version__} initialized")
+            self.logger.info(f"PDF directory: {config.pdf_dir}")
+            self.logger.info(f"Log directory: {config.log_dir}")
+            _initialization_logged = True
         
         # Use config values
         self.pdf_dir = Path(config.pdf_dir)
@@ -1403,6 +1455,22 @@ class PDFFetcher:
             except Exception as e:
                 self.logger.warning(f"Could not initialize Crossref fetcher: {e} - will skip Crossref lookup")
                 self.crossref_fetcher = None
+    
+    def set_postponed_domains(self, domains: Optional[set] = None, doi_prefixes: Optional[set] = None):
+        """
+        Set postponed domains and DOI prefixes (e.g., from cache).
+        
+        This allows external code (like the pipeline) to initialize PDFFetcher
+        with known problematic domains/prefixes to avoid unnecessary requests.
+        
+        Args:
+            domains: Set of domain names to postpone (e.g., {'pubs.acs.org', 'www.ams.org'})
+            doi_prefixes: Set of DOI prefixes to postpone (e.g., {'10.1021', '10.1088'})
+        """
+        if domains is not None:
+            self._cloudflare_domains.update(domains)
+        if doi_prefixes is not None:
+            self._cloudflare_doi_prefixes.update(doi_prefixes)
     
     def _get_driver(self, domain: Optional[str] = None) -> webdriver.Chrome:
         """
@@ -1540,6 +1608,57 @@ class PDFFetcher:
             # Challenge pages are typically small, while real article pages are large (MB)
             if any(secondary_indicators):
                 if page_size < 100000 or 'just a moment' in title or 'checking' in title:
+                    return True
+            
+            return False
+        except:
+            return False
+    
+    def _is_captcha_challenge(self, driver) -> bool:
+        """Check if current page contains a captcha challenge (non-Cloudflare).
+        
+        Detects various captcha systems including:
+        - IOP Publishing captcha
+        - reCAPTCHA
+        - hCaptcha
+        - Other publisher-specific captchas
+        """
+        try:
+            page_source = driver.page_source.lower()
+            title = driver.title.lower()
+            page_size = len(page_source)
+            
+            # Common captcha indicators (across multiple systems)
+            captcha_indicators = [
+                'captcha' in page_source,
+                'recaptcha' in page_source,
+                'hcaptcha' in page_source,
+                'verify you are human' in page_source,
+                'verify you are not a robot' in page_source,
+                'prove you are human' in page_source,
+                'security check' in page_source,
+                'access denied' in page_source and 'captcha' in page_source,
+            ]
+            
+            # IOP Publishing specific indicators
+            iop_indicators = [
+                'iop' in page_source and 'security' in page_source and ('captcha' in page_source or 'verify' in page_source),
+                'iop.org' in driver.current_url.lower() and 'security' in page_source,
+                'iop' in title.lower() and ('verify' in title.lower() or 'security' in title.lower()),
+            ]
+            
+            # If page is small (< 50KB) and contains captcha indicators, likely a captcha page
+            if page_size < 50000:
+                if any(captcha_indicators) or any(iop_indicators):
+                    return True
+            
+            # For larger pages, require multiple indicators or specific patterns
+            if any(iop_indicators):
+                return True
+            
+            if any(captcha_indicators) and page_size < 200000:
+                # Additional check: captcha pages often have specific text patterns
+                if 'please' in page_source and 'complete' in page_source:
                     return True
             
             return False
@@ -1746,6 +1865,50 @@ class PDFFetcher:
         self._domain_driver_initialized.clear()
         self._current_domain = None
     
+    def _cleanup_extra_windows(self, driver):
+        """
+        Close any extra windows/tabs that may have been opened during download attempts.
+        Keeps only the main window open for driver reuse.
+        
+        Args:
+            driver: Selenium WebDriver instance
+        """
+        if not driver:
+            return
+        
+        try:
+            handles = driver.window_handles
+            if len(handles) <= 1:
+                return  # No extra windows to close
+            
+            # Get the first window as the main window (or try to keep current if valid)
+            main_window = None
+            try:
+                current_handle = driver.current_window_handle
+                if current_handle in handles:
+                    main_window = current_handle
+                else:
+                    main_window = handles[0]
+            except:
+                main_window = handles[0]
+            
+            # Close all other windows
+            for handle in handles:
+                if handle != main_window:
+                    try:
+                        driver.switch_to.window(handle)
+                        driver.close()
+                    except Exception as e:
+                        logger.debug(f"Could not close window {handle}: {e}")
+            
+            # Switch back to main window
+            try:
+                driver.switch_to.window(main_window)
+            except Exception as e:
+                logger.debug(f"Could not switch back to main window: {e}")
+        except Exception as e:
+            logger.debug(f"Error cleaning up extra windows: {e}")
+    
     def _close_driver(self):
         """Close Selenium driver (legacy single driver)."""
         if self._driver and self._driver_initialized:
@@ -1900,6 +2063,93 @@ class PDFFetcher:
             result.publisher = publisher
             domain = urlparse(landing_url).netloc
             
+            # Explicit logging for ams.org encounters
+            is_ams_domain = domain and ('ams.org' in domain.lower() or domain.lower() in ('ams.org', 'www.ams.org'))
+            if is_ams_domain:
+                logger.warning("🔴 AMS.ORG DETECTED - Processing identifier")
+                logger.warning(f"   Identifier: {identifier}")
+                logger.warning(f"   Landing URL: {landing_url}")
+                logger.warning(f"   Domain: {domain}")
+                logger.warning(f"   Publisher: {publisher}")
+                logger.warning(f"   In postponed domains? {domain in self._cloudflare_domains or any('ams.org' in d for d in self._cloudflare_domains)}")
+            
+            # Explicit logging for books.rsc.org (test case for postponement debugging)
+            is_rsc_domain = domain and 'rsc.org' in domain.lower()
+            if is_rsc_domain:
+                logger.warning("🔵 BOOKS.RSC.ORG DETECTED - Processing identifier")
+                logger.warning(f"   Identifier: {identifier}")
+                logger.warning(f"   Landing URL: {landing_url}")
+                logger.warning(f"   Domain: {domain}")
+                logger.warning(f"   Publisher: {publisher}")
+                logger.warning(f"   In postponed domains? {domain in self._cloudflare_domains or any('rsc.org' in d for d in self._cloudflare_domains)}")
+                logger.warning(f"   All postponed domains: {sorted(list(self._cloudflare_domains))}")
+            
+            # CRITICAL: Check if this domain/DOI prefix is already postponed BEFORE attempting download
+            # This prevents wasting time on domains that we know will fail (Cloudflare, 403, captcha)
+            should_skip = False
+            skip_reason = None
+            matched_postponed_item = None
+            
+            # Check DOI prefix first (most specific)
+            if kind in ('doi', 'doi_url') and doi:
+                doi_prefix = self._extract_doi_prefix(doi)
+                if doi_prefix and doi_prefix in self._cloudflare_doi_prefixes:
+                    should_skip = True
+                    matched_postponed_item = doi_prefix
+                    skip_reason = f"DOI prefix '{doi_prefix}' already marked for postponement (Cloudflare/403/captcha)"
+            
+            # Check domain (for resource URLs or as fallback)
+            if not should_skip:
+                for postponed_domain in self._cloudflare_domains:
+                    if self._domains_match(domain, postponed_domain):
+                        should_skip = True
+                        matched_postponed_item = postponed_domain
+                        skip_reason = f"Domain '{domain}' matches postponed domain '{postponed_domain}' (Cloudflare/403/captcha)"
+                        break
+            
+            if should_skip:
+                # Explicit logging for ams.org skips
+                is_ams_skip = domain and ('ams.org' in domain.lower() or domain.lower() in ('ams.org', 'www.ams.org'))
+                if is_ams_skip:
+                    logger.warning("🔴 AMS.ORG SKIPPED - Postponed domain detected")
+                    logger.warning(f"   Identifier: {identifier}")
+                    logger.warning(f"   Landing URL: {landing_url}")
+                    logger.warning(f"   Domain: {domain}")
+                    logger.warning(f"   Matched postponed item: {matched_postponed_item}")
+                    logger.warning(f"   Reason: {skip_reason}")
+                    logger.warning(f"   All postponed domains: {sorted(list(self._cloudflare_domains))}")
+                    logger.warning("   " + "=" * 56)
+                else:
+                    # Explicit logging for books.rsc.org skips
+                    is_rsc_skip = domain and 'rsc.org' in domain.lower()
+                    if is_rsc_skip:
+                        logger.warning("🔵 BOOKS.RSC.ORG SKIPPED - Postponed domain detected")
+                        logger.warning(f"   Identifier: {identifier}")
+                        logger.warning(f"   Landing URL: {landing_url}")
+                        logger.warning(f"   Domain: {domain}")
+                        logger.warning(f"   Matched postponed item: {matched_postponed_item}")
+                        logger.warning(f"   Reason: {skip_reason}")
+                        logger.warning(f"   All postponed domains: {sorted(list(self._cloudflare_domains))}")
+                        logger.warning("   " + "=" * 56)
+                    else:
+                        logger.debug("=" * 60)
+                        logger.debug(f"SKIPPING IDENTIFIER - POSTPONED DOMAIN/PREFIX DETECTED")
+                        logger.debug(f"Identifier: {identifier}")
+                        logger.debug(f"Landing URL: {landing_url}")
+                        logger.debug(f"Domain: {domain}")
+                        if kind in ('doi', 'doi_url') and doi:
+                            doi_prefix_check = self._extract_doi_prefix(doi)
+                            logger.debug(f"DOI prefix: {doi_prefix_check}")
+                        logger.debug(f"Matched postponed item: {matched_postponed_item}")
+                        logger.debug(f"Reason: {skip_reason}")
+                        logger.debug(f"Current postponed domains ({len(self._cloudflare_domains)}): {sorted(list(self._cloudflare_domains))}")
+                        logger.debug(f"Current postponed DOI prefixes ({len(self._cloudflare_doi_prefixes)}): {sorted(list(self._cloudflare_doi_prefixes))}")
+                        logger.debug("=" * 60)
+                result.status = DownloadStatus.FAILURE
+                result.error_reason = skip_reason
+                self.metadata_store.update(result)
+                return result
+            
             # Strategy 1: Try Crossref for direct PDF URL (if DOI and Crossref available)
             # OPTIMIZATION: Reuse crossref_metadata if we already fetched it above
             # Crossref metadata is already cached in api_client, so we only cache extracted PDF URL locally
@@ -1948,6 +2198,8 @@ class PDFFetcher:
                     driver.get(landing_url)
                 except TimeoutException as e:
                     # Catch timeout during page load and handle gracefully
+                    # Clean up any extra windows that may have been opened
+                    self._cleanup_extra_windows(driver)
                     # This will be caught again in the outer try/except, but we want to log it cleanly here
                     logger.warning(f"Page load timeout for {identifier} at {landing_url}")
                     raise  # Re-raise to be handled by outer exception handler
@@ -1957,6 +2209,20 @@ class PDFFetcher:
                 if self._is_cloudflare_challenge(driver):
                     # Mark this domain/DOI prefix as having hit Cloudflare
                     self._cloudflare_domains.add(domain)
+                    
+                    # Explicit logging for books.rsc.org (test case)
+                    is_rsc_cloudflare = domain and 'rsc.org' in domain.lower()
+                    if is_rsc_cloudflare:
+                        logger.warning("🔵" * 30)
+                        logger.warning("🔵 BOOKS.RSC.ORG - CLOUDFLARE DETECTED - MARKING FOR POSTPONEMENT 🔵")
+                        logger.warning("🔵" * 30)
+                        logger.warning(f"Identifier: {identifier}")
+                        logger.warning(f"Resource URL: {landing_url}")
+                        logger.warning(f"Domain: {domain}")
+                        logger.warning(f"Domain '{domain}' added to _cloudflare_domains set")
+                        logger.warning(f"Total postponed domains in this fetcher now: {len(self._cloudflare_domains)}")
+                        logger.warning(f"All postponed domains in this fetcher: {sorted(list(self._cloudflare_domains))}")
+                        logger.warning("🔵" * 30)
                     
                     # If this is a DOI, also mark the DOI prefix
                     if kind in ('doi', 'doi_url') and doi:
@@ -1975,6 +2241,31 @@ class PDFFetcher:
                     
                     result.status = DownloadStatus.FAILURE
                     result.error_reason = f"Cloudflare challenge - Resource URL: {landing_url}, Publisher: {publisher or 'unknown'}"
+                    self.metadata_store.update(result)
+                    return result
+                
+                # Check for captcha challenge (non-Cloudflare) - if detected, log and skip
+                if self._is_captcha_challenge(driver):
+                    # Mark this domain/DOI prefix as having hit captcha
+                    self._cloudflare_domains.add(domain)
+                    
+                    # If this is a DOI, also mark the DOI prefix
+                    if kind in ('doi', 'doi_url') and doi:
+                        doi_prefix = self._extract_doi_prefix(doi)
+                        if doi_prefix:
+                            self._cloudflare_doi_prefixes.add(doi_prefix)
+                            logger.warning(f"DOI prefix '{doi_prefix}' marked due to captcha - remaining DOIs with this prefix will be postponed")
+                    
+                    logger.warning("=" * 60)
+                    logger.warning("CAPTCHA CHALLENGE DETECTED - SKIPPING")
+                    logger.warning(f"Identifier: {identifier}")
+                    logger.warning(f"Resource URL: {landing_url}")
+                    logger.warning(f"Publisher: {publisher or 'unknown'}")
+                    logger.warning(f"Domain '{domain}' marked - remaining requests from this domain will be postponed")
+                    logger.warning("=" * 60)
+                    
+                    result.status = DownloadStatus.FAILURE
+                    result.error_reason = f"Captcha challenge - Resource URL: {landing_url}, Publisher: {publisher or 'unknown'}"
                     self.metadata_store.update(result)
                     return result
                 
@@ -2029,6 +2320,12 @@ class PDFFetcher:
                         pass
                 logger.debug("Using Crossref PDF URL - attempting to use domain driver for cookies")
             
+            # Explicit logging for ams.org download attempts
+            if 'domain' in locals() and domain and ('ams.org' in domain.lower() or domain.lower() in ('ams.org', 'www.ams.org')):
+                logger.warning("🔴 AMS.ORG - Attempting PDF download")
+                logger.warning(f"   PDF URL: {pdf_url}")
+                logger.warning(f"   Output path: {pdf_path}")
+            
             success = self.download_manager.download(
                 pdf_url, 
                 pdf_path, 
@@ -2036,6 +2333,13 @@ class PDFFetcher:
                 referer=landing_url if landing_url else None,  # Pass referer for watermarking services
                 selenium_driver=driver_for_download  # Pass driver for Selenium fallback
             )
+            
+            # Explicit logging for ams.org download results
+            if 'domain' in locals() and domain and ('ams.org' in domain.lower() or domain.lower() in ('ams.org', 'www.ams.org')):
+                if success:
+                    logger.warning("🔴 AMS.ORG - Download SUCCESS")
+                else:
+                    logger.warning("🔴 AMS.ORG - Download FAILED")
             
             if success:
                 result.status = DownloadStatus.SUCCESS
@@ -2049,6 +2353,23 @@ class PDFFetcher:
             return result
             
         except (TimeoutError, TimeoutException) as e:
+            # Clean up any extra windows/tabs that may have been opened during the download attempt
+            # Try to clean up drivers that were used during this download attempt
+            try:
+                # Check if we have a driver in local scope (for landing page navigation)
+                if 'driver' in locals() and driver:
+                    self._cleanup_extra_windows(driver)
+                # Also check if driver_for_download exists (for PDF download)
+                if 'driver_for_download' in locals() and driver_for_download:
+                    self._cleanup_extra_windows(driver_for_download)
+                # Also clean up the current domain's driver if set (domain-specific driver may have opened windows)
+                if hasattr(self, '_current_domain') and self._current_domain:
+                    domain_driver = self._drivers_by_domain.get(self._current_domain)
+                    if domain_driver:
+                        self._cleanup_extra_windows(domain_driver)
+            except Exception as cleanup_error:
+                logger.debug(f"Error during window cleanup after timeout: {cleanup_error}")
+            
             # Handle Selenium/WebDriver timeouts gracefully
             # Get full error message - TimeoutException.msg contains the actual message
             # The error format is: "Message: timeout: Timed out receiving message from renderer: 29.596"
@@ -2125,9 +2446,214 @@ class PDFFetcher:
             self.metadata_store.update(result)
             return result
         except Exception as e:
-            # Check if it's a urllib3 ReadTimeoutError (Selenium connection timeout)
+            # Clean up any extra windows/tabs that may have been opened during the download attempt
+            try:
+                # Check if we have a driver in local scope (for landing page navigation)
+                if 'driver' in locals() and driver:
+                    self._cleanup_extra_windows(driver)
+                # Also check if driver_for_download exists (for PDF download)
+                if 'driver_for_download' in locals() and driver_for_download:
+                    self._cleanup_extra_windows(driver_for_download)
+                # Also clean up the current domain's driver if set (domain-specific driver may have opened windows)
+                if hasattr(self, '_current_domain') and self._current_domain:
+                    domain_driver = self._drivers_by_domain.get(self._current_domain)
+                    if domain_driver:
+                        self._cleanup_extra_windows(domain_driver)
+            except Exception as cleanup_error:
+                logger.debug(f"Error during window cleanup after exception: {cleanup_error}")
+            
+            # Check for specific HTTP error codes
             error_str = str(e)
+            error_str_lower = error_str.lower()
             error_type = type(e).__name__
+            
+            # Explicit logging for ams.org in ANY exception (before checking error types)
+            if 'ams.org' in error_str_lower:
+                logger.warning("🔴 AMS.ORG DETECTED IN EXCEPTION")
+                logger.warning(f"   Exception type: {error_type}")
+                logger.warning(f"   Identifier: {identifier}")
+                logger.warning(f"   Error message: {error_str[:400]}")
+                # Try to log domain if available
+                if 'domain' in locals():
+                    logger.warning(f"   Domain variable: {domain}")
+                elif 'landing_url' in locals() and landing_url:
+                    try:
+                        domain_from_url = urlparse(landing_url).netloc
+                        logger.warning(f"   Domain from landing_url: {domain_from_url}")
+                    except:
+                        pass
+                if 'pdf_url' in locals() and pdf_url:
+                    logger.warning(f"   PDF URL: {pdf_url}")
+            
+            # Check HTTP status code from exception if available
+            http_status_code = None
+            if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                http_status_code = e.response.status_code
+            
+            # Detect 404 Not Found errors (resource doesn't exist - permanent failure)
+            is_404_error = (
+                http_status_code == 404 or
+                '404' in error_str_lower or 
+                'not found' in error_str_lower or
+                ('http' in error_str_lower and '404' in error_str_lower)
+            )
+            
+            # Detect 403 Forbidden errors (access denied - might be temporary, postpone)
+            is_403_error = (
+                http_status_code == 403 or
+                '403' in error_str_lower or 
+                'forbidden' in error_str_lower or 
+                ('http' in error_str_lower and '403' in error_str_lower)
+            )
+            
+            # Handle 404 Not Found: mark as permanent failure (don't postpone)
+            if is_404_error:
+                result.status = DownloadStatus.PDF_NOT_FOUND
+                if 'landing_url' in locals():
+                    result.error_reason = f"404 Not Found - Resource URL: {landing_url}"
+                else:
+                    result.error_reason = f"404 Not Found: {error_str_lower[:200]}"
+                logger.warning(f"PDF not found (404) for {identifier}: {result.error_reason}")
+                self.metadata_store.update(result)
+                return result
+            
+            if is_403_error:
+                # Explicit logging for ams.org 403 errors
+                error_contains_ams = 'ams.org' in error_str_lower
+                if error_contains_ams:
+                    logger.warning("🔴 AMS.ORG - 403 ERROR DETECTED")
+                    logger.warning(f"   Identifier: {identifier}")
+                    logger.warning(f"   Error: {error_str[:300]}")
+                
+                # Extract domain from various sources (error message, pdf_url, landing_url, or existing domain variable)
+                detected_domain = None
+                
+                # First, try to get domain from existing variable scope (most reliable)
+                if 'domain' in locals() and domain:
+                    detected_domain = domain
+                    if error_contains_ams:
+                        logger.warning(f"   Extracted domain from variable scope: {detected_domain}")
+                
+                # Try to extract domain from PDF URL (if available)
+                if not detected_domain:
+                    if 'pdf_url' in locals() and pdf_url:
+                        try:
+                            detected_domain = urlparse(pdf_url).netloc
+                            if error_contains_ams:
+                                logger.warning(f"   Extracted domain from PDF URL: {detected_domain}")
+                        except:
+                            pass
+                
+                # Try to extract domain from landing URL (fallback)
+                if not detected_domain:
+                    if 'landing_url' in locals() and landing_url:
+                        try:
+                            detected_domain = urlparse(landing_url).netloc
+                            if error_contains_ams:
+                                logger.warning(f"   Extracted domain from landing URL: {detected_domain}")
+                        except:
+                            pass
+                
+                # Try to extract domain from error message (e.g., "403 Client Error: Forbidden for url: https://...")
+                # This is important because errors from download_manager.download() include the URL in the error message
+                if not detected_domain:
+                    # Use original error string (not lowercased) for URL extraction to preserve case
+                    # Try multiple patterns to extract URL from error message
+                    url_patterns = [
+                        r'for url:\s*(https?://[^\s\)]+)',  # Pattern: "for url: https://..." (most specific)
+                        r'url:\s*(https?://[^\s\)]+)',  # Pattern: "url: https://..."
+                        r'https?://([^\s/\)]+)',  # Basic pattern: http://domain or https://domain
+                    ]
+                    for pattern in url_patterns:
+                        url_match = re.search(pattern, error_str, re.IGNORECASE)
+                        if url_match:
+                            # Extract URL and then get domain from it
+                            extracted_url = url_match.group(1) if url_match.lastindex >= 1 else url_match.group(0)
+                            try:
+                                detected_domain = urlparse(extracted_url).netloc
+                                if detected_domain:
+                                    if error_contains_ams:
+                                        logger.warning(f"   Extracted domain from error message URL: {extracted_url} -> {detected_domain}")
+                                    break
+                            except Exception:
+                                # If URL parsing fails, the extracted_url might already be a domain
+                                # Check if it looks like a domain (contains dots)
+                                if '.' in extracted_url and not extracted_url.startswith('http'):
+                                    detected_domain = extracted_url
+                                    if error_contains_ams:
+                                        logger.warning(f"   Extracted domain directly from error message: {detected_domain}")
+                                    break
+                
+                # Extract domain from response URL if available (last resort)
+                if not detected_domain and hasattr(e, 'response') and hasattr(e.response, 'url'):
+                    try:
+                        detected_domain = urlparse(e.response.url).netloc
+                    except:
+                        pass
+                
+                # Mark domain if we found it
+                if detected_domain:
+                    # Check if this is ams.org BEFORE adding (for logging)
+                    is_ams_postponement = detected_domain and ('ams.org' in detected_domain.lower())
+                    
+                    self._cloudflare_domains.add(detected_domain)
+                    
+                    # Explicit logging for ams.org postponements - ALWAYS log this prominently
+                    if is_ams_postponement:
+                        logger.warning("")
+                        logger.warning("🔴" * 30)
+                        logger.warning("🔴 AMS.ORG 403 FORBIDDEN - MARKING FOR POSTPONEMENT 🔴")
+                        logger.warning("🔴" * 30)
+                        logger.warning(f"Identifier: {identifier}")
+                        if 'landing_url' in locals() and landing_url:
+                            logger.warning(f"Landing URL: {landing_url}")
+                        if 'pdf_url' in locals() and pdf_url:
+                            logger.warning(f"PDF URL: {pdf_url}")
+                        logger.warning(f"Detected domain: {detected_domain}")
+                        logger.warning(f"Domain '{detected_domain}' added to postponed domains set")
+                        logger.warning(f"Total postponed domains now: {len(self._cloudflare_domains)}")
+                        logger.warning(f"All postponed domains: {sorted(list(self._cloudflare_domains))}")
+                        logger.warning("🔴" * 30)
+                        logger.warning("")
+                    else:
+                        logger.warning("=" * 60)
+                        logger.warning("403 FORBIDDEN ERROR - MARKING DOMAIN FOR POSTPONEMENT")
+                        logger.warning(f"Identifier: {identifier}")
+                        if 'landing_url' in locals() and landing_url:
+                            logger.warning(f"Resource URL: {landing_url}")
+                        if 'pdf_url' in locals() and pdf_url:
+                            logger.warning(f"PDF URL: {pdf_url}")
+                        logger.warning(f"Domain '{detected_domain}' marked - remaining requests from this domain will be postponed")
+                        logger.warning("=" * 60)
+                else:
+                    # Log a warning if we couldn't extract the domain (shouldn't happen, but useful for debugging)
+                    # Special logging if error contains ams.org
+                    if 'ams.org' in error_str_lower:
+                        logger.warning("🔴" * 30)
+                        logger.warning("🔴 AMS.ORG 403 ERROR - BUT COULD NOT EXTRACT DOMAIN!")
+                        logger.warning("🔴" * 30)
+                        logger.warning(f"Identifier: {identifier}")
+                        logger.warning(f"Error message: {error_str[:400]}")
+                        logger.warning("This should not happen - domain should be extractable from error message")
+                        logger.warning("🔴" * 30)
+                    logger.warning(f"403 Forbidden error detected but could not extract domain from error: {error_str_lower[:200]}")
+                
+                # If this is a DOI, also mark the DOI prefix
+                if 'kind' in locals() and kind in ('doi', 'doi_url') and 'doi' in locals() and doi:
+                    doi_prefix = self._extract_doi_prefix(doi)
+                    if doi_prefix:
+                        self._cloudflare_doi_prefixes.add(doi_prefix)
+                        logger.warning(f"DOI prefix '{doi_prefix}' marked due to 403 Forbidden - remaining DOIs with this prefix will be postponed")
+                
+                result.status = DownloadStatus.FAILURE
+                if 'landing_url' in locals():
+                    result.error_reason = f"403 Forbidden - Resource URL: {landing_url}"
+                else:
+                    result.error_reason = f"403 Forbidden error: {error_str_lower[:200]}"
+                self.metadata_store.update(result)
+                return result
+            
+            # Check if it's a urllib3 ReadTimeoutError (Selenium connection timeout)
             if (Urllib3ReadTimeoutError and isinstance(e, Urllib3ReadTimeoutError)) or \
                ('ReadTimeoutError' in error_type) or \
                ('HTTPConnectionPool' in error_str and 'localhost' in error_str and 'Read timed out' in error_str):

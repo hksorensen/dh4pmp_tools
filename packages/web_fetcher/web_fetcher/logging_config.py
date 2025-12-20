@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
+# Module-level flag to track if we've already logged the file logging message
+_logging_file_message_logged = False
+
 
 def setup_logging(
     log_file: Optional[Path] = None,
@@ -29,7 +32,7 @@ def setup_logging(
     Returns:
         Configured logger
     """
-    logger = logging.getLogger('pdf_fetcher_v2')
+    logger = logging.getLogger('pdf_fetcher')
     logger.setLevel(logging.DEBUG)  # Capture everything, handlers filter
     
     # Remove existing handlers
@@ -57,7 +60,11 @@ def setup_logging(
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         
-        logger.info(f"Logging to file: {log_file}")
+        # Only log the file logging message once (avoid duplicates in parallel processing)
+        global _logging_file_message_logged
+        if not _logging_file_message_logged:
+            logger.info(f"Logging to file: {log_file}")
+            _logging_file_message_logged = True
     
     return logger
 
