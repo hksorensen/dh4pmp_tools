@@ -2,7 +2,7 @@
 Utility functions for bibfetcher.
 """
 
-from .latex import text_to_latex, latex_to_text, normalize_bibkey_chars, ucfirst
+from .latex import text_to_latex, text_to_latex_preserve_danish, latex_to_text, normalize_bibkey_chars, ucfirst
 from .keys import (
     generate_bibkey,
     generate_bibkey_prefix,
@@ -17,6 +17,7 @@ from .clipboard import (
 
 __all__ = [
     'text_to_latex',
+    'text_to_latex_preserve_danish',
     'latex_to_text',
     'normalize_bibkey_chars',
     'ucfirst',

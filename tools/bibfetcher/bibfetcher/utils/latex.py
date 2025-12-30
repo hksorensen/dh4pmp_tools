@@ -6,33 +6,38 @@ based on the latexify function from from_doi.py.
 """
 
 
-def text_to_latex(text: str) -> str:
+def text_to_latex(text: str, preserve_danish: bool = False) -> str:
     """Convert Unicode text to LaTeX-safe format.
-    
+
     Converts special characters to their LaTeX equivalents and escapes
     characters that have special meaning in LaTeX.
-    
+
     Args:
         text: Unicode text string
-        
+        preserve_danish: If True, preserve æ, ø, å for proper Danish sorting
+
     Returns:
         LaTeX-formatted string
     """
     if text is None:
         return None
-    
+
     # HTML entities to Unicode
     text = text.replace('&amp;', '&')
-    
+
     # Unicode to LaTeX special characters
     text = text.replace('ó', "{\\'{o}}")
     text = text.replace('á', "{\\'{a}}")
     text = text.replace('é', "{\\'{e}}")
     text = text.replace('í', "{\\'{\\i}}")
     text = text.replace('ñ', "{\\~{n}}")
-    text = text.replace('æ', "{\\ae}")
-    text = text.replace('ø', "{\\o}")
-    text = text.replace('å', "{\\a}")
+
+    # Danish characters (only escape if not preserving)
+    if not preserve_danish:
+        text = text.replace('æ', "{\\ae}")
+        text = text.replace('ø', "{\\o}")
+        text = text.replace('å', "{\\a}")
+
     text = text.replace('ü', "{\\\"u}")
     text = text.replace('ö', "{\\\"o}")
     text = text.replace('ä', "{\\\"a}")
@@ -67,6 +72,21 @@ def text_to_latex(text: str) -> str:
     text = text.replace(' ', ' ')  # Non-breaking space to regular space
     
     return text
+
+
+def text_to_latex_preserve_danish(text: str) -> str:
+    """Convert Unicode text to LaTeX-safe format, preserving Danish characters.
+
+    Wrapper around text_to_latex(preserve_danish=True) for convenience.
+    Use this for author/editor fields in BibTeX to preserve proper sorting.
+
+    Args:
+        text: Unicode text string
+
+    Returns:
+        LaTeX-formatted string with Danish characters (æ, ø, å) preserved
+    """
+    return text_to_latex(text, preserve_danish=True)
 
 
 def latex_to_text(latex: str) -> str:

@@ -10,7 +10,7 @@ import re
 import html
 
 from .base import BaseFetcher
-from ..utils.latex import text_to_latex, ucfirst
+from ..utils.latex import text_to_latex, text_to_latex_preserve_danish, ucfirst
 
 
 class CrossrefFetcher(BaseFetcher):
@@ -181,10 +181,16 @@ class CrossrefFetcher(BaseFetcher):
         entry = {k: v for k, v in entry.items() if v is not None}
         
         # Apply LaTeX formatting to text fields
-        text_fields = ['author', 'editor', 'title', 'subtitle', 'journal', 'booktitle', 'publisher']
+        text_fields = ['title', 'subtitle', 'journal', 'booktitle', 'publisher']
         for field in text_fields:
             if field in entry and entry[field]:
                 entry[field] = text_to_latex(entry[field])
+
+        # Apply Danish-preserving LaTeX formatting to name fields (for proper sorting)
+        name_fields = ['author', 'editor']
+        for field in name_fields:
+            if field in entry and entry[field]:
+                entry[field] = text_to_latex_preserve_danish(entry[field])
         
         # Split title/subtitle if colon present and subtitle not already set
         if 'title' in entry and 'subtitle' not in entry:

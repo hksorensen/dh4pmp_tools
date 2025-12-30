@@ -7,7 +7,7 @@ such as adding arXiv-specific fields or removing unwanted fields.
 
 from typing import Dict, List, Callable
 import re
-from .utils.latex import text_to_latex
+from .utils.latex import text_to_latex, text_to_latex_preserve_danish
 
 
 class EntryProcessor:
@@ -313,12 +313,19 @@ class EntryProcessor:
         """
         # Fields that should NOT be latexified (URLs, raw LaTeX, etc.)
         skip_fields = {'url', 'doi', 'eprint', 'archiveprefix', 'primaryclass', 'file'}
-        
+
+        # Fields that need Danish character preservation (for proper sorting)
+        danish_preserve_fields = {'author', 'editor'}
+
         for key, value in entry.items():
             # Only process string values, skip special fields
             if isinstance(value, str) and key.lower() not in skip_fields:
-                entry[key] = text_to_latex(value)
-        
+                if key.lower() in danish_preserve_fields:
+                    # Preserve Danish characters (æ, ø, å) for sorting
+                    entry[key] = text_to_latex_preserve_danish(value)
+                else:
+                    entry[key] = text_to_latex(value)
+
         return entry
     
     @staticmethod
