@@ -15,6 +15,7 @@ from .filters import (
     normalize_categories,
     normalize_years,
     matches_categories,
+    matches_primary_category,
 )
 from .exceptions import DownloadError, CacheError, ParseError
 
@@ -409,6 +410,7 @@ class ArxivMetadata:
     def stream(
         self,
         categories: Category | list[str] | str | None = None,
+        primary_category: Category | list[str] | str | None = None,
         years: int | range | list[int] | None = None,
         min_authors: int | None = None,
         max_authors: int | None = None,
@@ -422,11 +424,12 @@ class ArxivMetadata:
         for large datasets.
         
         Args:
-            categories: Category filter (enum, string, or list)
+            categories: Category filter (enum, string, or list) - matches ANY category
+            primary_category: Filter on first/primary category only (enum, string, or list)
             years: Year filter (int, range, or list)
             min_authors: Minimum number of authors
             max_authors: Maximum number of authors
-            has_doi: Filter for papers with DOI
+            has_doi: Filter for papers with DOI (True/False)
             filter_fn: Custom filter function taking paper dict
             
         Yields:
@@ -434,13 +437,18 @@ class ArxivMetadata:
             
         Example:
             >>> fetcher = ArxivMetadata()
+            >>> # Match any category
             >>> for paper in fetcher.stream(categories=Category.MATH, years=2024):
+            ...     print(paper['title'])
+            >>> # Match only if first category is math
+            >>> for paper in fetcher.stream(primary_category=Category.MATH, years=2024):
             ...     print(paper['title'])
         """
         metadata_path = self._get_metadata_path()
         
         # Normalize inputs
         cat_list = normalize_categories(categories)
+        primary_cat_list = normalize_categories(primary_category)
         year_list = normalize_years(years)
         
         # Determine if we're reading gzipped or plain file
@@ -464,6 +472,9 @@ class ArxivMetadata:
                 if cat_list and not matches_categories(paper, cat_list):
                     continue
                 
+                if primary_cat_list and not matches_primary_category(paper, primary_cat_list):
+                    continue
+                
                 if year_list and paper.get('year') not in year_list:
                     continue
                 
@@ -478,7 +489,8 @@ class ArxivMetadata:
                         continue
                 
                 if has_doi is not None:
-                    paper_has_doi = bool(paper.get('doi', '').strip())
+                    doi_value = paper.get('doi')
+                    paper_has_doi = bool(doi_value and str(doi_value).strip())
                     if paper_has_doi != has_doi:
                         continue
                 
@@ -490,6 +502,7 @@ class ArxivMetadata:
     def download_and_fetch(
         self,
         categories: Category | list[str] | str | None = None,
+        primary_category: Category | list[str] | str | None = None,
         years: int | range | list[int] | None = None,
         min_authors: int | None = None,
         max_authors: int | None = None,
@@ -507,7 +520,8 @@ class ArxivMetadata:
         efficient than downloading the full file first.
         
         Args:
-            categories: Category filter (Category enum, string, or list)
+            categories: Category filter (Category enum, string, or list) - matches ANY category
+            primary_category: Filter on first/primary category only (Category enum, string, or list)
             years: Year filter (int, range, or list of ints)
             min_authors: Minimum number of authors
             max_authors: Maximum number of authors
@@ -554,6 +568,7 @@ class ArxivMetadata:
             
             # Normalize filters
             cat_list = normalize_categories(categories)
+            primary_cat_list = normalize_categories(primary_category)
             year_list = normalize_years(years)
             
             # Process line-by-line with filters
@@ -581,6 +596,9 @@ class ArxivMetadata:
                     if cat_list and not matches_categories(paper, cat_list):
                         continue
                     
+                    if primary_cat_list and not matches_primary_category(paper, primary_cat_list):
+                        continue
+                    
                     if year_list and paper.get('year') not in year_list:
                         continue
                     
@@ -595,7 +613,8 @@ class ArxivMetadata:
                             continue
                     
                     if has_doi is not None:
-                        paper_has_doi = bool(paper.get('doi', '').strip())
+                        doi_value = paper.get('doi')
+                        paper_has_doi = bool(doi_value and str(doi_value).strip())
                         if paper_has_doi != has_doi:
                             continue
                     
@@ -644,6 +663,7 @@ class ArxivMetadata:
     def fetch(
         self,
         categories: Category | list[str] | str | None = None,
+        primary_category: Category | list[str] | str | None = None,
         years: int | range | list[int] | None = None,
         min_authors: int | None = None,
         max_authors: int | None = None,
@@ -659,7 +679,8 @@ class ArxivMetadata:
         Results are returned as a pandas DataFrame for easy analysis.
         
         Args:
-            categories: Category filter (Category enum, string, or list)
+            categories: Category filter (Category enum, string, or list) - matches ANY category
+            primary_category: Filter on first/primary category only (Category enum, string, or list)
             years: Year filter (int, range, or list of ints)
             min_authors: Minimum number of authors
             max_authors: Maximum number of authors
@@ -674,10 +695,17 @@ class ArxivMetadata:
             
         Example:
             >>> fetcher = ArxivMetadata()
+            >>> # Match any category
             >>> df = fetcher.fetch(
             ...     categories=Category.MATH,
             ...     years=range(2020, 2025),
             ...     min_authors=2
+            ... )
+            >>> # Match only if first category is math
+            >>> df = fetcher.fetch(
+            ...     primary_category=Category.MATH,
+            ...     years=2024,
+            ...     has_doi=True
             ... )
         """
         papers = []
@@ -685,6 +713,7 @@ class ArxivMetadata:
         # Stream papers and collect
         stream = self.stream(
             categories=categories,
+            primary_category=primary_category,
             years=years,
             min_authors=min_authors,
             max_authors=max_authors,

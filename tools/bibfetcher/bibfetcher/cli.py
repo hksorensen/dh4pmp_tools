@@ -67,9 +67,12 @@ def cmd_fetch(args):
         
         # Interactive: Ask if user wants to append to file
         if not args.quiet and not args.no_interactive:
+            # Get config early so it's available in both branches
+            config = get_user_config()
+
             try:
                 response = input("\nAppend to bibliography file? [Y/n]: ").strip().lower()
-                
+
                 # Default to yes (any response except explicit 'n' or 'no')
                 if response in ('n', 'no'):
                     # No append - copy full BibTeX to clipboard (current behavior)
@@ -83,8 +86,6 @@ def cmd_fetch(args):
                 
                 else:
                     # Yes (default) - append to file
-                    # Get bibliography file from config
-                    config = get_user_config()
                     bib_dirs = config.get_bibliography_directories()
                     
                     if not bib_dirs:

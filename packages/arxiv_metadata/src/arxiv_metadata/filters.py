@@ -210,3 +210,43 @@ def matches_categories(paper: dict, categories: list[str]) -> bool:
             return True
     
     return False
+
+
+def matches_primary_category(paper: dict, categories: list[str]) -> bool:
+    """Check if paper's first/primary category matches any of the specified categories.
+    
+    Args:
+        paper: Paper metadata dict (should have 'primary_category' or 'categories')
+        categories: List of category strings or prefixes
+        
+    Returns:
+        True if primary category matches any of the specified categories
+        
+    Examples:
+        >>> paper = {'categories': ['math.AG', 'cs.LG'], 'primary_category': 'math.AG'}
+        >>> matches_primary_category(paper, ['math'])
+        True
+        >>> matches_primary_category(paper, ['cs'])
+        False
+    """
+    # Get primary category (first category)
+    primary_cat = paper.get('primary_category')
+    if not primary_cat:
+        # Fallback: get first category from categories list
+        paper_cats = paper.get('categories', [])
+        if isinstance(paper_cats, str):
+            paper_cats = paper_cats.split()
+        if not paper_cats:
+            return False
+        primary_cat = paper_cats[0]
+    
+    # Check if primary category matches any of the specified categories
+    for cat in categories:
+        # Exact match
+        if primary_cat == cat:
+            return True
+        # Prefix match (e.g., "math" matches "math.AG")
+        if primary_cat.startswith(f"{cat}."):
+            return True
+    
+    return False

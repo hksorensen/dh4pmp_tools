@@ -138,10 +138,6 @@ def pie_chart(
         >>> # Custom grouping logic
         >>> fig, ax = pie_chart(counts, other_callback=lambda label, value: value < 5 or 'misc' in label.lower())
     """
-    # Adjust figsize if legend is below (increase height to prevent pie shrinking)
-    if legend:
-        figsize = (figsize[0], figsize[1] * 1.2)
-
     fig, ax = plt.subplots(figsize=figsize)
 
     # Extract data and labels
@@ -221,16 +217,12 @@ def pie_chart(
             **kwargs,
         )
 
-        # Adjust axes position to maximize pie size (give it more vertical space)
-        pos = ax.get_position()
-        ax.set_position([pos.x0, pos.y0 + 0.1, pos.width, pos.height * 0.95])
-
         # Add legend below the pie (better for long labels)
         ax.legend(
             wedges,
             label_list,
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.15),  # Move further down since we have more space
+            bbox_to_anchor=(0.5, -0.05),  # Just below the pie
             ncol=min(3, len(label_list)),  # Max 3 columns
             frameon=False,
         )
