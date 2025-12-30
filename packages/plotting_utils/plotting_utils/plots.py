@@ -101,6 +101,7 @@ def pie_chart(
     other_threshold: Optional[float] = None,
     other_callback: Optional[callable] = None,
     other_label: str = "Other",
+    label_order: Optional[List[str]] = None,
     **kwargs,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
@@ -119,6 +120,7 @@ def pie_chart(
         other_threshold: If set, group items with value < threshold as "Other"
         other_callback: Custom function (label, value) -> bool to determine if item goes to "Other"
         other_label: Label for grouped items (default: "Other")
+        label_order: Custom order for labels (list of label names). Labels not in list are appended at end.
         **kwargs: Additional args passed to plt.pie()
 
     Returns:
@@ -131,6 +133,9 @@ def pie_chart(
 
         >>> # Show only top 5 categories, group rest as "Other"
         >>> fig, ax = pie_chart(counts, title='Top 5 Categories', top_n=5)
+
+        >>> # Custom order for slices
+        >>> fig, ax = pie_chart(counts, label_order=['Category A', 'Category C', 'Category B'])
 
         >>> # Group categories with < 10 items as "Other"
         >>> fig, ax = pie_chart(counts, other_threshold=10)
@@ -150,6 +155,34 @@ def pie_chart(
     else:
         values = data
         label_list = labels
+
+    # Reorder data if custom order specified
+    if label_order:
+        # Convert to lists
+        values = list(values)
+        label_list = list(label_list)
+
+        # Create dict for easy lookup
+        data_dict = dict(zip(label_list, values))
+
+        # Build new ordered lists
+        new_labels = []
+        new_values = []
+
+        # First, add items in the specified order
+        for label in label_order:
+            if label in data_dict:
+                new_labels.append(label)
+                new_values.append(data_dict[label])
+
+        # Then, add any remaining items not in label_order
+        for label, value in zip(label_list, values):
+            if label not in label_order:
+                new_labels.append(label)
+                new_values.append(value)
+
+        label_list = new_labels
+        values = new_values
 
     # Group items into "Other" if requested
     if top_n is not None or other_threshold is not None or other_callback is not None:
@@ -222,7 +255,7 @@ def pie_chart(
             wedges,
             label_list,
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.05),  # Just below the pie
+            bbox_to_anchor=(0.5, -0.02),  # Very close to pie edge
             ncol=min(3, len(label_list)),  # Max 3 columns
             frameon=False,
         )
@@ -247,9 +280,9 @@ def pie_chart(
     ax.axis("equal")
 
     if title:
-        ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
 
-    plt.tight_layout()
+    plt.tight_layout(pad=0.5)
 
     return fig, ax
 
