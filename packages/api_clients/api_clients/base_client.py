@@ -227,7 +227,7 @@ class BaseAPIClient(ABC):
                 raise RuntimeError("Invalid credentials or unauthorized access")
             
             else:
-                logger.error(f"Unexpected status code {response.status_code}")
+                logger.debug(f"Unexpected status code {response.status_code}")
                 return self._retry_request(url, retry_count)
         
         except requests.Timeout:
@@ -241,7 +241,7 @@ class BaseAPIClient(ABC):
     def _retry_request(self, url: str, retry_count: int) -> Optional[requests.Response]:
         """Handle retry logic with exponential backoff."""
         if retry_count >= self.config.max_retries:
-            logger.error(f"Max retries ({self.config.max_retries}) reached")
+            logger.debug(f"Max retries ({self.config.max_retries}) reached")
             return None
         
         delay = min(
@@ -381,35 +381,43 @@ class BaseSearchFetcher:
         self.client = client
         self.cache = cache
     
-    def fetch(self, query: str, force_refresh: bool = False, show_progress: bool = True, **params) -> Optional[pd.DataFrame]:
+    def fetch(self, query: str, force_refresh: bool = False, show_progress: bool = True, max_results: Optional[int] = None, **params) -> Optional[pd.DataFrame]:
         """
         Fetch results for a query, using cache if available.
-        
+
         Args:
             query: Query string
             force_refresh: If True, bypass cache
             show_progress: If True, show progress bar (default: True)
+            max_results: Maximum total results to fetch (stops pagination after this many items)
+                        If None, fetches all results (subject to max_results_per_query limit)
             **params: Additional API-specific parameters to pass to search
-        
+
         Returns:
             DataFrame with columns: ID, page, num_hits, data
         """
-        # Build cache key that includes params
+        # Build cache key that includes params (but not max_results, as it's a fetch parameter)
         cache_key = query
         if params:
             # Sort params for consistent cache keys
             param_str = '&'.join(f"{k}={v}" for k, v in sorted(params.items()))
             cache_key = f"{query}|{param_str}"
-        
+
+        # Add max_results to cache key if specified (different limits = different cache)
+        if max_results is not None:
+            cache_key += f"|max={max_results}"
+
         # Check cache first
         if not force_refresh:
             cached = self.cache.get(cache_key)
             if cached is not None:
                 logger.info(f"Cache hit for query: {cache_key[:50]}")
                 return cached
-        
+
         logger.info(f"Fetching query: {cache_key[:50]}...")
-        
+        if max_results is not None:
+            logger.info(f"Will stop after fetching {max_results} total results")
+
         # Try to import tqdm for progress bar
         pbar = None
         if show_progress:
@@ -421,28 +429,26 @@ class BaseSearchFetcher:
                 logger.debug("tqdm not available - install with: pip install tqdm")
         else:
             tqdm_available = False
-        
+
         # Fetch from API
         pages = []
         total_results = None
-        
+        total_fetched = 0  # Track total items fetched
+
         try:
             for page_data in self.client.search_iter(query, params if params else None):
                 # Initialize progress bar on first page (when we know total)
                 if pbar is None and tqdm_available and page_data.get('total_results'):
                     total_results = page_data['total_results']
-                    # Estimate number of pages based on typical page size
-                    estimated_pages = min(
-                        (total_results // 100) + 1,  # Rough estimate
-                        (total_results // 25) + 1    # More conservative
-                    )
+                    # If max_results specified, cap progress bar at that
+                    progress_total = min(total_results, max_results) if max_results else total_results
                     pbar = tqdm(
-                        total=total_results,
+                        total=progress_total,
                         desc=f"Fetching {cache_key[:30]}",
                         unit="results",
                         leave=True
                     )
-                
+
                 pages.append({
                     'ID': cache_key,
                     'page': page_data['page'],
@@ -450,11 +456,16 @@ class BaseSearchFetcher:
                     'data': page_data.get('results'),
                     'error': page_data.get('error')
                 })
-                
-                # Update progress bar
-                if pbar is not None and page_data.get('results'):
-                    pbar.update(len(page_data['results']))
-                
+
+                # Update counters
+                if page_data.get('results'):
+                    page_size = len(page_data['results'])
+                    total_fetched += page_size
+
+                    # Update progress bar
+                    if pbar is not None:
+                        pbar.update(page_size)
+
                 # Handle errors
                 if page_data.get('error'):
                     if page_data.get('error') == 'too_many_results':
@@ -463,6 +474,11 @@ class BaseSearchFetcher:
                             f"exceeding max_hits ({self.client.config.max_results_per_query})"
                         )
                         pages[-1]['data'] = None
+                    break
+
+                # Stop if we've fetched enough results
+                if max_results is not None and total_fetched >= max_results:
+                    logger.info(f"Reached max_results limit ({max_results}), stopping pagination")
                     break
         
         except Exception as e:

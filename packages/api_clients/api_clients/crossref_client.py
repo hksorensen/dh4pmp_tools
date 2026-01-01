@@ -1149,34 +1149,83 @@ class CrossrefSearchFetcher(BaseSearchFetcher):
         logger.info("No crossref.yaml found - using public pool (works fine, just slower)")
         return None
     
-    def search_by_doi(self, doi: str) -> Optional[Dict[str, Any]]:
+    def fetch_by_doi(self, doi: str, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
         """
-        Fetch metadata for a specific DOI.
-        
+        Fetch metadata for a specific DOI with caching.
+
         Args:
             doi: DOI string (e.g., "10.1371/journal.pone.0033693")
-        
+            force_refresh: If True, bypass cache and fetch fresh data
+
         Returns:
             Metadata dict or None if not found
         """
         import requests
-        
+
+        # Check cache first
+        cache_key = f"doi:{doi}"
+        if not force_refresh:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                logger.info(f"Cache hit for DOI: {doi}")
+                # Cache stores DataFrame, extract the metadata dict
+                if isinstance(cached, pd.DataFrame) and len(cached) > 0:
+                    if 'data' in cached.columns:
+                        data = cached.iloc[0]['data']
+                        if isinstance(data, list) and len(data) > 0:
+                            return data[0]
+                        elif isinstance(data, dict):
+                            return data
+                    # Fallback: return the row as dict
+                    return cached.iloc[0].to_dict()
+                elif isinstance(cached, dict):
+                    return cached
+
+        # Fetch from API
+        logger.info(f"Fetching metadata for DOI: {doi}")
         url = f"https://api.crossref.org/works/{doi}"
-        
+
         # Add mailto if available
         if self.client.config.mailto:
             url += f"?mailto={self.client.config.mailto}"
-        
+
         try:
             response = self.client._make_request(url)
             if response and response.ok:
                 data = response.json()
                 if 'message' in data:
-                    return data['message']
+                    metadata = data['message']
+
+                    # Store in cache (same format as CrossrefBibliographicFetcher.fetch_by_doi)
+                    cache_df = pd.DataFrame([{
+                        'ID': cache_key,
+                        'page': 1,
+                        'num_hits': 1,
+                        'data': [metadata],
+                        'error': None
+                    }])
+                    self.cache.store(cache_key, cache_df, total_results=1, num_pages=1)
+
+                    return metadata
         except Exception as e:
             logger.error(f"Error fetching DOI {doi}: {e}")
-        
+
         return None
+
+    def search_by_doi(self, doi: str, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Deprecated: Use fetch_by_doi() instead.
+
+        This method is deprecated and will be removed in a future version.
+        Use fetch_by_doi() for consistent naming across Crossref clients.
+        """
+        import warnings
+        warnings.warn(
+            "search_by_doi() is deprecated, use fetch_by_doi() instead",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        return self.fetch_by_doi(doi, force_refresh)
     
     def search_with_filters(
         self, 
