@@ -1,5 +1,5 @@
 """Version information for pdf-fetcher."""
 
-__version__ = "0.1.0"
-__author__ = "Your Name"
-__email__ = "your.email@example.com"
+__version__ = "1.0.0"
+__author__ = "Henrik Kragh Sørensen"
+__email__ = "henrik@example.com"
