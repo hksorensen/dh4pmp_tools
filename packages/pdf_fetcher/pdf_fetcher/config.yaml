@@ -3,7 +3,7 @@
 
 # Directory Settings
 output_dir: "./pdfs"
-metadata_db_path: null  # Default: output_dir/metadata.db
+metadata_db_path: null  # Default: ~/.pdf_fetcher/metadata.db (global)
 
 # Download Settings
 max_workers: 4          # Parallel download threads
