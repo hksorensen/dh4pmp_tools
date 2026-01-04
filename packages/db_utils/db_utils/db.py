@@ -76,6 +76,7 @@ class SQLiteDB(DB):
         df: pd.DataFrame,
         table_name: str,
         replace: bool = False,
+        if_exists: str = None,
         upsert: bool = False,
         conflict_keys: list = None,
         table_layout: dict = None,
@@ -89,6 +90,8 @@ class SQLiteDB(DB):
             df: DataFrame to write
             table_name: Name of table
             replace: If True, replace entire table (default: False)
+            if_exists: How to behave if table exists ('replace', 'append', 'fail').
+                      For compatibility with pandas/MySQL API (overrides replace param)
             upsert: If True, use INSERT OR REPLACE/UPDATE (default: False)
             conflict_keys: Columns to use for conflict resolution (required if upsert=True)
             table_layout: Dict of column types {column_name: sqlite_type}
@@ -108,6 +111,10 @@ class SQLiteDB(DB):
             # Custom schema
             db.write_sql(df, 'papers', table_layout={'doi': 'TEXT PRIMARY KEY', 'year': 'INTEGER'})
         """
+        # Handle if_exists parameter for compatibility
+        if if_exists is not None:
+            replace = (if_exists == 'replace')
+
         conn = self.get_conn()
 
         # Create/replace table if needed
@@ -340,6 +347,58 @@ class SQLiteDB(DB):
         cols_str = ', '.join([f'"{col}"' for col in columns])
 
         sql = f'CREATE {unique_str} INDEX IF NOT EXISTS "{index_name}" ON "{table_name}" ({cols_str})'
+        self.execute(sql)
+
+    def read_table(self, table_name: str, columns: list = ['*']) -> pd.DataFrame:
+        """
+        Convenience method to read entire table or specific columns.
+
+        Args:
+            table_name: Name of table
+            columns: List of column names or '*' for all columns.
+                    Can also be comma-separated string.
+
+        Returns:
+            DataFrame with requested columns
+
+        Examples:
+            # Read entire table
+            df = db.read_table('papers')
+
+            # Read specific columns
+            df = db.read_table('papers', columns=['title', 'year'])
+
+            # Using string
+            df = db.read_table('papers', columns='title, year')
+        """
+        if isinstance(columns, str):
+            columns = [c.strip() for c in columns.split(',')]
+        elif not isinstance(columns, list):
+            raise TypeError(f"columns must be list or str, got {type(columns)}")
+
+        # Build column list with proper quoting
+        cols = ', '.join(f'"{c}"' if c != '*' else c for c in columns)
+        return self.read_sql(f'SELECT {cols} FROM "{table_name}"')
+
+    def delete(self, table_name: str, where_clause: str = 'FALSE'):
+        """
+        Delete rows from table matching WHERE clause.
+
+        Args:
+            table_name: Name of table
+            where_clause: SQL WHERE clause (default: 'FALSE' deletes nothing)
+
+        Examples:
+            # Delete specific rows
+            db.delete('papers', where_clause='year < 2020')
+
+            # Delete all rows (use with caution!)
+            db.delete('papers', where_clause='TRUE')
+
+            # Delete by ID
+            db.delete('papers', where_clause='id = 123')
+        """
+        sql = f'DELETE FROM "{table_name}" WHERE {where_clause}'
         self.execute(sql)
 
 
