@@ -10,7 +10,8 @@ A Python package for automatically downloading academic PDFs using:
 """
 
 from pdf_fetcher.__version__ import __version__, __author__, __email__
-from pdf_fetcher.fetcher import BasePDFFetcher, DownloadResult
+from pdf_fetcher.fetcher import PDFFetcher, DownloadResult
+from pdf_fetcher.postponed_cache import PostponedDomainsCache
 from pdf_fetcher.utils import (
     sanitize_doi_to_filename,
     get_publisher,
@@ -22,8 +23,9 @@ __all__ = [
     "__version__",
     "__author__",
     "__email__",
-    "BasePDFFetcher",
+    "PDFFetcher",
     "DownloadResult",
+    "PostponedDomainsCache",
     "sanitize_doi_to_filename",
     "get_publisher",
     "get_doi_prefix",

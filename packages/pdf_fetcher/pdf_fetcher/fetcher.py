@@ -45,7 +45,7 @@ class DownloadResult:
             return f"✗ {self.identifier} ({self.error_reason})"
 
 
-class BasePDFFetcher:
+class PDFFetcher:
     """
     Generic PDF fetcher with strategy pattern and database tracking.
 
@@ -233,6 +233,20 @@ class BasePDFFetcher:
         except ImportError:
             logger.warning("database module not found, operating without database")
             self.db = None
+
+        # Initialize postponed domains cache (global cache in ~/.cache/pdffetcher)
+        try:
+            from .postponed_cache import PostponedDomainsCache
+
+            self.postponed_cache = PostponedDomainsCache()
+            stats = self.postponed_cache.get_stats()
+            logger.info(
+                f"Postponed domains cache initialized: "
+                f"{stats['blocked_domains']} domains, {stats['blocked_doi_prefixes']} DOI prefixes"
+            )
+        except ImportError:
+            logger.warning("postponed_cache module not found, skipping domain filtering")
+            self.postponed_cache = None
 
     def _load_strategies(self) -> List:
         """Load all available publisher strategies."""
@@ -503,6 +517,27 @@ class BasePDFFetcher:
                 pbar.n = completed
                 pbar.refresh()
 
+        # Pre-filter using postponed domains cache (skip known Cloudflare/blocked sources)
+        postponed_identifiers = []
+        if self.postponed_cache:
+            processable, blocked = self.postponed_cache.filter_batch(identifiers)
+            postponed_identifiers = blocked
+
+            # Create skipped results for postponed identifiers
+            if postponed_identifiers:
+                for identifier in postponed_identifiers:
+                    results.append(
+                        DownloadResult(
+                            identifier=identifier,
+                            status="postponed",
+                            error_reason="Skipped: Domain/DOI prefix in postponed cache (known Cloudflare/access issues)",
+                        )
+                    )
+
+            # Continue with processable identifiers only
+            identifiers = processable
+            total = len(identifiers) + len(postponed_identifiers)  # Update total for progress bar
+
         # Batch check download status (one DB query instead of N queries)
         if self.db:
             batch_status = self.db.get_batch_status(identifiers, max_attempts=self.max_attempts)
@@ -597,6 +632,16 @@ class BasePDFFetcher:
         # Close progress bar if we created one
         if pbar:
             pbar.close()
+
+        # Analyze results to update postponed domains cache
+        if self.postponed_cache and results:
+            analysis = self.postponed_cache.analyze_batch(results)
+            if analysis['domains_added'] > 0 or analysis['prefixes_added'] > 0:
+                logger.info(
+                    f"Updated postponed cache: +{analysis['domains_added']} domains, "
+                    f"+{analysis['prefixes_added']} DOI prefixes "
+                    f"(total: {analysis['total_domains']} domains, {analysis['total_prefixes']} prefixes)"
+                )
 
         return results
 
