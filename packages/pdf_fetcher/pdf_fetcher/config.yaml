@@ -1,0 +1,32 @@
+# PDF Fetcher Configuration
+# All settings can be overridden via command-line arguments
+
+# Directory Settings
+output_dir: "./pdfs"
+metadata_db_path: null  # Default: output_dir/metadata.db
+
+# Download Settings
+max_workers: 4          # Parallel download threads
+max_attempts: 3         # Max retry attempts per PDF
+timeout: 30             # Download timeout in seconds (per request)
+
+# Unpaywall API Settings
+unpaywall:
+  email: "research@example.org"  # REQUIRED: Set your real email for Unpaywall API
+  # Get API access at: https://unpaywall.org/products/api
+  # Rate limit: 100,000 requests/day (free for research)
+
+# HTTP Headers (to avoid bot detection)
+user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Strategy Priority Order (lower number = higher priority)
+# Current order:
+#   1. Unpaywall (priority 5) - Try open access first
+#   2. Elsevier (priority 10) - Publisher-specific
+#   3. Springer (priority 10) - Publisher-specific
+#   4. Generic (priority 100) - Fallback for unknown publishers
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

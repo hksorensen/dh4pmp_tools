@@ -34,43 +34,9 @@ except ImportError:
     PaywallError = None
     PDFNotFoundError = None
 
-# PDF Fetcher (spec-compliant implementation with YAML configuration)
-try:
-    from .pdf_fetcher import (
-        PDFFetcher,
-        DownloadStatus,
-        DownloadResult,
-        RateLimiter,
-        IdentifierNormalizer,
-        PublisherDetector,
-        DOIResolver,
-        PDFLinkFinder,
-        DownloadManager,
-        MetadataStore,
-    )
-    # Configuration system (YAML-only)
-    from .config import PDFFetcherConfig, load_config, create_example_config
-    from .logging_config import setup_logging, create_download_summary_log
-    # Version info
-    from .version import __version__ as _pdf_fetcher_version, CHANGELOG
-except ImportError as e:
-    PDFFetcher = None
-    DownloadStatus = None
-    DownloadResult = None
-    RateLimiter = None
-    IdentifierNormalizer = None
-    PublisherDetector = None
-    DOIResolver = None
-    PDFLinkFinder = None
-    DownloadManager = None
-    MetadataStore = None
-    PDFFetcherConfig = None
-    load_config = None
-    create_example_config = None
-    setup_logging = None
-    create_download_summary_log = None
-    _pdf_fetcher_version = None
-    CHANGELOG = None
+# Note: PDFFetcher has been moved to a standalone package
+# Install with: pip install -e packages/pdf_fetcher
+# Import with: from pdf_fetcher import BasePDFFetcher, DownloadResult
 
 # Note: Pipeline base classes have been moved to the 'pipelines' package
 # Import them with: from pipelines import BasePipeline, PipelineConfig, PipelineResult
@@ -88,22 +54,4 @@ __all__ = [
     "PDFDownloadError",
     "PaywallError",
     "PDFNotFoundError",
-    # PDF Fetcher core
-    "PDFFetcher",
-    "DownloadStatus",
-    "DownloadResult",
-    "RateLimiter",
-    "IdentifierNormalizer",
-    "PublisherDetector",
-    "DOIResolver",
-    "PDFLinkFinder",
-    "DownloadManager",
-    "MetadataStore",
-    # PDF Fetcher configuration (YAML-only)
-    "PDFFetcherConfig",
-    "load_config",
-    "create_example_config",
-    "setup_logging",
-    "create_download_summary_log",
-    "CHANGELOG",
 ]
