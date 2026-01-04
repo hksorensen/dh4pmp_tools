@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf_fetcher"
-version = "0.1.0"
+version = "1.0.0"
 description = "Automated academic PDF downloader with publisher-specific strategies and Unpaywall integration"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ authors = [
 license = {text = "MIT"}
 requires-python = ">=3.8"
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
