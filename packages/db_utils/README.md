@@ -4,11 +4,19 @@ Database utilities for pandas DataFrames with unified interfaces for SQLite and 
 
 ## Features
 
+### Low-Level Database API
 - **Unified API** - Same interface for SQLite and MySQL
 - **UPSERT Support** - SQLite `INSERT OR REPLACE` / `ON CONFLICT UPDATE`
 - **Schema Management** - Define custom column types
 - **Bulk Operations** - Efficient batch inserts with transactions
 - **Simple to Use** - Familiar pandas-like interface
+
+### High-Level Table Storage API
+- **ID-Based Operations** - Get/delete by primary key
+- **Automatic Encoding** - JSON serialization for complex data types
+- **GZIP Compression** - Compress large text fields automatically
+- **Smart Deduplication** - `store()` method avoids inserting duplicate IDs
+- **Backend Agnostic** - Same code works with SQLite or MySQL
 
 ## Installation
 
@@ -65,6 +73,81 @@ db = MySQL('my_database', ip='localhost', port=3306)
 # Same API as SQLiteDB
 db.write_sql(papers, 'papers')
 result = db.read_sql('SELECT * FROM papers')
+```
+
+### TableStorage - High-Level API
+
+For ID-based operations with automatic JSON/GZIP encoding:
+
+```python
+from db_utils import SQLiteTableStorage
+import pandas as pd
+
+# Initialize with encoding options
+storage = SQLiteTableStorage(
+    db_path='research.db',
+    table_name='papers',
+    column_ID='doi',
+    ID_type=str,
+    json_columns=['authors', 'keywords'],      # Auto JSON encode/decode
+    gzip_columns=['abstract', 'full_text'],   # Auto GZIP compress/decompress
+    table_layout={
+        'doi': 'TEXT PRIMARY KEY',
+        'title': 'TEXT',
+        'year': 'INTEGER'
+    }
+)
+
+# Prepare data with complex types
+papers = pd.DataFrame({
+    'doi': ['10.1234/a', '10.1234/b'],
+    'title': ['Paper A', 'Paper B'],
+    'year': [2020, 2021],
+    'authors': [['Alice', 'Bob'], ['Charlie']],          # Lists auto-encoded to JSON
+    'keywords': [['AI', 'ML'], ['Data Science']],        # Lists auto-encoded to JSON
+    'abstract': ['Long text...' * 100, 'More text...']  # Strings auto-compressed
+})
+
+# Store data (automatic encoding + timestamping)
+storage.write(papers)
+
+# Retrieve data (automatic decoding + decompression)
+result = storage.get()
+print(result['authors'])  # Returns: [['Alice', 'Bob'], ['Charlie']]
+
+# Get specific IDs
+papers = storage.get(IDs=['10.1234/a'])
+
+# Smart store - only inserts new IDs
+new_papers = pd.DataFrame({
+    'doi': ['10.1234/a', '10.1234/c'],  # 'a' exists, 'c' is new
+    'title': ['Paper A', 'Paper C'],
+    # ...
+})
+count = storage.store(new_papers)  # Only inserts 'c', returns 1
+
+# Delete by IDs
+storage.delete(['10.1234/b'])
+
+# Get all IDs
+all_ids = storage.get_ID_list()
+
+# Count rows
+total = storage.size()
+recent = storage.size(where_clause='year >= 2020')
+```
+
+**Backend-Agnostic:** Use `MySQLTableStorage` for MySQL with identical API!
+
+```python
+from db_utils import MySQLTableStorage
+
+storage = MySQLTableStorage(
+    database_name='research',
+    table_name='papers',
+    column_ID='doi',
+    # ... same parameters as SQLiteTableStorage
+)
 ```
 
 ## API Reference
@@ -373,3 +456,171 @@ Part of dh4pmp_tools package.
 ## Author
 
 Henrik Kragh Sørensen
+
+## TableStorage API Reference
+
+### Initialization
+
+```python
+storage = SQLiteTableStorage(
+    db_path='data.db',              # Path to SQLite database
+    table_name='my_table',          # Name of table
+    column_ID='id',                 # ID column name (default: 'ID')
+    ID_type=str,                    # ID type: str or int (default: str)
+    json_columns=['col1', 'col2'],  # Columns to JSON encode (default: [])
+    gzip_columns=['col3'],          # Columns to GZIP compress (default: [])
+    columns=None,                   # Specific columns to work with (default: all)
+    table_layout={'id': 'TEXT PRIMARY KEY'}  # Column types (default: {})
+)
+```
+
+### Core Methods
+
+#### `write(df, timestamp=True)`
+Replace entire table with DataFrame. Automatically encodes columns.
+
+```python
+storage.write(df)  # Adds timestamp column automatically
+```
+
+#### `store(df, timestamp=True)` → int
+Insert only rows with new IDs (smart deduplication). Returns count of inserted rows.
+
+```python
+count = storage.store(df)  # Only inserts new IDs
+```
+
+#### `get(IDs=None, columns=None, where_clause='TRUE', offset=None, limit=None)` → DataFrame
+Retrieve data with flexible filtering. Automatically decodes columns.
+
+```python
+# Get all rows
+df = storage.get()
+
+# Get specific IDs
+df = storage.get(IDs=[123, 456])
+
+# Get specific columns
+df = storage.get(columns=['title', 'year'])
+
+# Complex query
+df = storage.get(where_clause='year >= 2020', limit=100, offset=10)
+```
+
+#### `delete(IDs)`
+Delete rows by IDs.
+
+```python
+storage.delete([123, 456])
+```
+
+### Utility Methods
+
+#### `exists()` → bool
+Check if table exists.
+
+```python
+if storage.exists():
+    print("Table found")
+```
+
+#### `get_ID_list()` → List
+Get list of all IDs in table.
+
+```python
+all_ids = storage.get_ID_list()
+```
+
+#### `size(where_clause='TRUE')` → int
+Count rows matching WHERE clause.
+
+```python
+total = storage.size()
+recent = storage.size(where_clause='year >= 2020')
+```
+
+### Automatic Encoding/Decoding
+
+**JSON Columns** - Automatically serialize/deserialize:
+- Python lists → JSON strings (stored as TEXT)
+- Python dicts → JSON strings
+- NumPy arrays → JSON arrays
+
+**GZIP Columns** - Automatically compress/decompress:
+- Strings → Compressed bytes (stored as BLOB/LONGBLOB)
+- Saves significant space for large text fields
+
+**Example:**
+```python
+storage = SQLiteTableStorage(
+    db_path='papers.db',
+    table_name='papers',
+    json_columns=['authors', 'metadata'],
+    gzip_columns=['full_text', 'abstract']
+)
+
+# Writing
+df = pd.DataFrame({
+    'id': [1],
+    'authors': [['Alice', 'Bob']],              # List → JSON
+    'metadata': [{'year': 2020, 'venue': 'X'}], # Dict → JSON
+    'full_text': ['Very long text...' * 1000]   # String → GZIP
+})
+storage.write(df)
+# Stored as: authors='["Alice","Bob"]', full_text=b'\x1f\x8b...'
+
+# Reading
+result = storage.get()
+print(result['authors'])   # Returns: [['Alice', 'Bob']]  (decoded)
+print(result['metadata'])  # Returns: [{'year': 2020, ...}]  (decoded)
+print(result['full_text']) # Returns: ['Very long text...'] (decompressed)
+```
+
+### Backend Comparison
+
+| Feature | SQLiteTableStorage | MySQLTableStorage |
+|---------|-------------------|-------------------|
+| Setup | File-based | Requires MySQL server |
+| ID Types | str, int | str, int |
+| JSON Columns | TEXT | TEXT/JSON |
+| GZIP Columns | BLOB | LONGBLOB |
+| Performance | Fast for <100K rows | Scales to millions |
+| Concurrent Writes | Limited | Full support |
+
+### Migration from mysql_storage
+
+If you're migrating from the old `mysql_storage` class:
+
+```python
+# Old (MySQL only)
+from dh4pmp.db import mysql_storage
+
+storage = mysql_storage(
+    database_name='research',
+    table_name='papers',
+    column_ID='doi',
+    ID_type=str,
+    json_columns=['authors'],
+    gzip_columns=['abstract']
+)
+
+# New (Backend-agnostic)
+from db_utils import SQLiteTableStorage  # or MySQLTableStorage
+
+storage = SQLiteTableStorage(
+    db_path='research.db',  # Changed: db_path instead of database_name
+    table_name='papers',
+    column_ID='doi',
+    ID_type=str,
+    json_columns=['authors'],
+    gzip_columns=['abstract']
+)
+
+# All methods work the same!
+storage.write(df)
+storage.store(df)
+data = storage.get(IDs=['10.1234/a'])
+```
+
+**API is 100% compatible** - just change the import and initialization!
+
