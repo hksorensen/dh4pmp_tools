@@ -1,5 +1,5 @@
 """
-BasePDFFetcher - Generic PDF downloading infrastructure
+PDFFetcher - Generic PDF downloading infrastructure
 
 This is the main orchestrator that:
 - Manages publisher strategies
@@ -147,12 +147,12 @@ class PDFFetcher:
             Publisher name or "Unknown" if prefix not recognized
 
         Example:
-            >>> BasePDFFetcher.get_publisher_from_doi("10.1007/s11784-025-01219-x")
+            >>> PDFFetcher.get_publisher_from_doi("10.1007/s11784-025-01219-x")
             'Springer'
         """
         # Extract prefix (part before first slash)
         prefix = doi.split("/")[0] if "/" in doi else doi
-        return BasePDFFetcher.DOI_PREFIX_TO_PUBLISHER.get(prefix, "Unknown")
+        return PDFFetcher.DOI_PREFIX_TO_PUBLISHER.get(prefix, "Unknown")
 
     def __init__(
         self,
@@ -657,7 +657,7 @@ if __name__ == "__main__":
     # Quick test
     logging.basicConfig(level=logging.INFO)
 
-    fetcher = BasePDFFetcher(output_dir="./test_pdfs")
+    fetcher = PDFFetcher(output_dir="./test_pdfs")
 
     # Test single download
     result = fetcher.fetch("10.1007/s10623-024-01403-z")

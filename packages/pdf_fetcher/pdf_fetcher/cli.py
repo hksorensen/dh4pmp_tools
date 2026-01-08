@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from pdf_fetcher import BasePDFFetcher, __version__
+from pdf_fetcher import PDFFetcher, __version__
 
 
 def setup_logging(verbose: bool = False):
@@ -214,7 +214,7 @@ Examples:
     if args.db:
         fetcher_kwargs['metadata_db_path'] = args.db
 
-    fetcher = BasePDFFetcher(**fetcher_kwargs)
+    fetcher = PDFFetcher(**fetcher_kwargs)
 
     # Show statistics
     if args.stats:
