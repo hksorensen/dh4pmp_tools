@@ -86,6 +86,9 @@ class ElsevierTDMStrategy(DownloadStrategy):
         self._request_count = 0
         self._quota_reset_time = time.time() + (7 * 24 * 3600)  # 7 days
         
+        # VPN requirement (only enable TDM if on institutional network or have InstToken)
+        self.require_vpn = self.config.get('require_vpn', None)  # e.g., "130.225" for AU
+
         # Validate configuration
         if not self.api_key or self.api_key == "YOUR_API_KEY_HERE":
             logger.warning(
@@ -94,8 +97,31 @@ class ElsevierTDMStrategy(DownloadStrategy):
             )
             self._enabled = False
         else:
-            self._enabled = True
-            logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}...")
+            # Check VPN requirement if configured (and no InstToken)
+            if self.require_vpn and not self.inst_token:
+                try:
+                    from network_utils import check_vpn_status
+                    is_vpn, current_ip, msg = check_vpn_status(self.require_vpn)
+                    if not is_vpn:
+                        logger.warning(
+                            f"Elsevier TDM strategy disabled: {msg}. "
+                            "API returns first-page-only PDFs when off-campus without InstToken. "
+                            "Please connect to VPN or add InstToken to config."
+                        )
+                        self._enabled = False
+                    else:
+                        self._enabled = True
+                        logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}... ({msg})")
+                except ImportError:
+                    logger.warning(
+                        "network_utils not installed, cannot check VPN status. "
+                        "Elsevier TDM may return incomplete PDFs if off-campus without InstToken."
+                    )
+                    self._enabled = True
+                    logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}...")
+            else:
+                self._enabled = True
+                logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}...")
     
     def _load_config(self, config_path: Path) -> Dict:
         """Load configuration from YAML file."""
@@ -192,11 +218,21 @@ class ElsevierTDMStrategy(DownloadStrategy):
                 timeout=self.timeout,
                 allow_redirects=True
             )
-            
+
             if response.status_code == 200:
+                # Check for "first page only" restriction BEFORE downloading
+                els_status = response.headers.get('X-ELS-Status', '')
+                if 'limited to first page' in els_status.lower():
+                    logger.warning(
+                        f"Elsevier TDM: {identifier} - {els_status}. "
+                        "Skipping (need VPN or InstToken for full access)."
+                    )
+                    self._stats['pdf_not_found'] += 1
+                    return None
+
                 self._stats['pdf_found'] += 1
                 logger.debug(f"Elsevier TDM: PDF available for {identifier}")
-                
+
                 # Return the API URL - fetcher will download it with our custom headers
                 return api_url
             

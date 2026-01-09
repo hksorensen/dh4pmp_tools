@@ -50,6 +50,9 @@ Examples:
   # Clear all failed download attempts (useful after network issues)
   pdf-fetcher --clear-failures
 
+  # Force re-download of PDFs (even if already successfully downloaded)
+  pdf-fetcher --force 10.1007/s10623-024-01403-z
+
   # List archived files
   pdf-fetcher --list-archived
 
@@ -172,6 +175,12 @@ Examples:
         '-v', '--verbose',
         action='store_true',
         help='Enable verbose logging'
+    )
+
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force re-download of PDFs even if already successfully downloaded'
     )
 
     parser.add_argument(
@@ -587,7 +596,7 @@ Examples:
         print(f"Progress: {completed}/{total} ({percentage:.1f}%)", end='\r')
 
     # Download
-    results = fetcher.fetch_batch(dois, progress_callback=progress_callback)
+    results = fetcher.fetch_batch(dois, progress_callback=progress_callback, force=args.force)
 
     # Print results
     print("\n\n" + "="*80)
