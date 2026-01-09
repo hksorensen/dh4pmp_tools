@@ -122,10 +122,10 @@ class PDFFetcher:
                 try:
                     with open(config_file, "r") as f:
                         config = yaml.safe_load(f)
-                    logger.info(f"Loaded config from {config_file}")
+                    logger.info(f"Loaded config from {config_file.resolve()}")
                     return config or {}
                 except Exception as e:
-                    logger.error(f"Failed to load config from {config_file}: {e}")
+                    logger.error(f"Failed to load config from {config_file.resolve()}: {e}")
                     continue
 
         # No config found
@@ -301,19 +301,24 @@ class PDFFetcher:
 
         return self.db.should_download(identifier, max_attempts=self.max_attempts)
 
-    def fetch(self, identifier: str, strategy_name: Optional[str] = None) -> DownloadResult:
+    def fetch(self, identifier: str, strategy_name: Optional[str] = None, force: bool = False) -> DownloadResult:
         """
         Fetch a single PDF.
 
         Args:
             identifier: DOI or URL
             strategy_name: Force specific strategy (optional)
+            force: If True, bypass database checks and force re-download (default: False)
 
         Returns:
             DownloadResult with status and details
         """
-        # Check if should download
-        should_dl, reason = self.should_download(identifier)
+        # Check if should download (skip check if force=True)
+        if not force:
+            should_dl, reason = self.should_download(identifier)
+        else:
+            should_dl, reason = True, None
+
         if not should_dl:
             # Double-check: if marked as success, verify file actually exists
             if self.db and reason == "Already downloaded successfully":
@@ -417,8 +422,25 @@ class PDFFetcher:
                     last_error = error
                     continue  # Try next strategy
 
+                # Check for Elsevier TDM warning (first-page-only due to lack of entitlement)
+                els_status = pdf_response.headers.get('X-ELS-Status', '')
+                if 'limited to first page' in els_status.lower():
+                    error = f"Elsevier TDM: {els_status} - need VPN or InstToken for full access"
+                    logger.warning(f"{strategy.__class__.__name__}: {error}, trying next strategy")
+                    last_error = error
+                    continue  # Try next strategy
+
+                # Download PDF content properly with streaming
+                # IMPORTANT: Must iterate over chunks when stream=True to get complete file
+                pdf_content = bytearray()
+                for chunk in pdf_response.iter_content(chunk_size=8192):
+                    if chunk:  # filter out keep-alive chunks
+                        pdf_content.extend(chunk)
+
+                pdf_content = bytes(pdf_content)
+
                 # Validate PDF
-                if not pdf_response.content.startswith(b"%PDF"):
+                if not pdf_content.startswith(b"%PDF"):
                     error = "Downloaded file is not a PDF"
                     logger.warning(f"{strategy.__class__.__name__}: {error}, trying next strategy")
                     last_error = error
@@ -429,7 +451,7 @@ class PDFFetcher:
                 local_path = self.output_dir / sanitized_name
 
                 with open(local_path, "wb") as f:
-                    f.write(pdf_response.content)
+                    f.write(pdf_content)
 
                 logger.info(f"✓ Downloaded: {identifier} → {local_path.name}")
 
@@ -491,6 +513,7 @@ class PDFFetcher:
         identifiers: List[str],
         progress_callback: Optional[Callable[[int, int], None]] = None,
         show_progress: bool = True,
+        force: bool = False,
     ) -> List[DownloadResult]:
         """
         Fetch multiple PDFs in parallel.
@@ -499,6 +522,7 @@ class PDFFetcher:
             identifiers: List of DOIs or URLs
             progress_callback: Optional callback(completed, total)
             show_progress: If True, show tqdm progress bar (default: True)
+            force: If True, re-download PDFs even if already successfully downloaded (default: False)
 
         Returns:
             List of DownloadResults
@@ -539,7 +563,11 @@ class PDFFetcher:
             total = len(identifiers) + len(postponed_identifiers)  # Update total for progress bar
 
         # Batch check download status (one DB query instead of N queries)
-        if self.db:
+        # Skip status check if force=True (re-download everything)
+        if force:
+            batch_status = {id: (True, None) for id in identifiers}
+            logger.info(f"Force mode enabled: re-downloading all {len(identifiers)} PDFs")
+        elif self.db:
             batch_status = self.db.get_batch_status(identifiers, max_attempts=self.max_attempts)
             logger.info(
                 f"Batch status check: {sum(1 for s, _ in batch_status.values() if s)} need download, "
@@ -594,7 +622,7 @@ class PDFFetcher:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # Submit only identifiers that need downloading
                 future_to_id = {
-                    executor.submit(self.fetch, identifier): identifier
+                    executor.submit(self.fetch, identifier, force=force): identifier
                     for identifier in to_download
                 }
 
