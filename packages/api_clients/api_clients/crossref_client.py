@@ -18,7 +18,7 @@ import pandas as pd
 import yaml
 
 from .base_client import BaseAPIClient, APIConfig, RateLimiter, BaseSearchFetcher
-from caching import LocalCache
+from caching import SQLiteLocalCache
 
 logger = logging.getLogger(__name__)
 
@@ -484,9 +484,9 @@ class CrossrefBibliographicFetcher:
             max_retries=kwargs.get('max_retries', 3),
         )
         
-        # Initialize client and cache
+        # Initialize client and cache (using SQLite for faster metadata access)
         self.client = CrossrefBibliographicClient(config)
-        self.cache = LocalCache(
+        self.cache = SQLiteLocalCache(
             cache_dir=cache_dir,
             compression=True,
             max_age_days=kwargs.get('cache_max_age_days', None)
@@ -964,29 +964,37 @@ class CrossrefBibliographicFetcher:
     def fetch_by_doi(
         self,
         doi: str,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        cache_negative: bool = True,
+        retry_negative: bool = False
     ) -> Optional[Dict[str, Any]]:
         """
         Fetch full Crossref metadata for a specific DOI.
-        
+
         This is the most reliable way to get metadata when you already know the DOI.
         Uses caching to avoid redundant API calls.
-        
+
         Args:
             doi: DOI string (e.g., "10.1126/science.abe1107")
-            force_refresh: If True, bypass cache and fetch fresh data
-        
+            force_refresh: If True, bypass ALL cache (positive and negative) and fetch fresh data
+            cache_negative: If True, cache negative results (DOI not found) to avoid
+                          repeated API calls for invalid DOIs (default: True)
+            retry_negative: If True, ignore cached negative results and retry API call
+                          (useful for retrying temporarily failed DOIs) (default: False)
+                          Note: This only affects negative cached results, positive results are kept
+
         Returns:
             Full Crossref metadata dict, or None if DOI not found.
             Contains all metadata fields: title, authors, journal, year, etc.
-        
+
         Example:
             >>> fetcher = CrossrefBibliographicFetcher()
             >>> metadata = fetcher.fetch_by_doi("10.1126/science.abe1107")
             >>> if metadata:
             ...     print(f"Title: {metadata.get('title', [None])[0]}")
-            ...     print(f"Journal: {metadata.get('container-title', [None])[0]}")
-            ...     print(f"Year: {metadata.get('published-print', {}).get('date-parts', [[None]])[0][0]}")
+
+            >>> # Retry a previously failed DOI
+            >>> metadata = fetcher.fetch_by_doi("10.bad/doi", retry_negative=True)
         """
         # Check cache first
         cache_key = f"doi:{doi}"
@@ -994,8 +1002,17 @@ class CrossrefBibliographicFetcher:
             cached = self.cache.get(cache_key)
             if cached is not None:
                 logger.debug(f"Cache hit for DOI: {doi}")
-                # Cache might store as DataFrame or dict
+                # Check if this is a cached negative result
                 if isinstance(cached, pd.DataFrame) and len(cached) > 0:
+                    # Check for error field indicating negative cache
+                    if 'error' in cached.columns and cached.iloc[0]['error'] == 'not_found':
+                        if retry_negative:
+                            logger.info(f"Retrying previously failed DOI: {doi}")
+                            # Fall through to fetch from API
+                        else:
+                            logger.debug(f"Cached negative result for DOI: {doi}")
+                            return None
+
                     if 'data' in cached.columns:
                         data = cached.iloc[0]['data']
                         if isinstance(data, list) and len(data) > 0:
@@ -1004,13 +1021,13 @@ class CrossrefBibliographicFetcher:
                     return cached.iloc[0].to_dict()
                 elif isinstance(cached, dict):
                     return cached
-        
+
         # Fetch from API
         logger.info(f"Fetching metadata for DOI: {doi}")
-        
+
         # Build URL
         url = f"https://api.crossref.org/works/{doi}"
-        
+
         # Use the client's session for proper headers and rate limiting
         try:
             response = self.client._make_request(url)
@@ -1018,8 +1035,8 @@ class CrossrefBibliographicFetcher:
                 data = response.json()
                 if 'message' in data:
                     metadata = data['message']
-                    
-                    # Store in cache
+
+                    # Store in cache (positive result)
                     cache_df = pd.DataFrame([{
                         'ID': cache_key,
                         'page': 1,
@@ -1028,14 +1045,212 @@ class CrossrefBibliographicFetcher:
                         'error': None
                     }])
                     self.cache.store(cache_key, cache_df, total_results=1, num_pages=1)
-                    
+
                     return metadata
             else:
-                logger.warning(f"DOI not found or error: {doi}")
+                # DOI not found - cache negative result if enabled
+                if cache_negative:
+                    logger.debug(f"Caching negative result for DOI: {doi}")
+                    cache_df = pd.DataFrame([{
+                        'ID': cache_key,
+                        'page': 1,
+                        'num_hits': 0,
+                        'data': None,
+                        'error': 'not_found'
+                    }])
+                    self.cache.store(cache_key, cache_df, total_results=0, num_pages=1, status='not_found')
+                else:
+                    logger.warning(f"DOI not found (not cached): {doi}")
+
                 return None
         except Exception as e:
-            logger.error(f"Error fetching DOI {doi}: {e}")
+            # Error fetching - cache negative result if enabled
+            if cache_negative:
+                logger.debug(f"Caching error result for DOI: {doi}")
+                cache_df = pd.DataFrame([{
+                    'ID': cache_key,
+                    'page': 1,
+                    'num_hits': 0,
+                    'data': None,
+                    'error': str(e)
+                }])
+                self.cache.store(cache_key, cache_df, total_results=0, num_pages=1, status='error', error_msg=str(e))
+            else:
+                logger.error(f"Error fetching DOI {doi}: {e}")
+
             return None
+
+    def fetch_by_dois(
+        self,
+        dois: List[str],
+        force_refresh: bool = False,
+        max_workers: int = 4,
+        use_batch_cache: bool = True,
+        show_progress: bool = True,
+        cache_negative: bool = True,
+        retry_negative: bool = False
+    ) -> Dict[str, Optional[Dict]]:
+        """
+        Fetch metadata for multiple DOIs in batch (optimized for caching).
+
+        This is much faster than calling fetch_by_doi() in a loop because:
+        1. Uses batch cache lookup (1 SQL query instead of N)
+        2. Only fetches uncached DOIs from API
+        3. Optional parallel API requests
+        4. Progress bar for long-running operations
+        5. Caches negative results to avoid repeated failed lookups
+
+        Args:
+            dois: List of DOIs to fetch
+            force_refresh: If True, ignore ALL cache and fetch from API
+            max_workers: Number of parallel workers for API requests (default: 4)
+            use_batch_cache: If True, use batch cache operations (default: True)
+            show_progress: If True, show progress bar for API fetching (default: True)
+            cache_negative: If True, cache invalid/not-found DOIs to avoid repeated
+                          API calls (default: True)
+            retry_negative: If True, retry DOIs with cached negative results
+                          (useful for retrying after temporary failures) (default: False)
+
+        Returns:
+            Dictionary mapping DOI to metadata dict (or None if not found)
+
+        Example:
+            >>> fetcher = CrossrefBibliographicFetcher()
+            >>> results = fetcher.fetch_by_dois(["10.1234/a", "10.5678/b"])
+            >>> # Returns: {"10.1234/a": {...}, "10.5678/b": None}
+            >>> # Invalid DOIs are cached, so next call won't hit API again
+
+            >>> # Retry failed DOIs
+            >>> results = fetcher.fetch_by_dois(dois, retry_negative=True)
+        """
+        if not dois:
+            return {}
+
+        results = {}
+        cache_keys = [f"doi:{doi}" for doi in dois]
+        doi_to_cache_key = {doi: f"doi:{doi}" for doi in dois}
+
+        # Step 1: Batch cache lookup (if enabled and not force_refresh)
+        if use_batch_cache and not force_refresh and hasattr(self.cache, 'get_many'):
+            logger.info(f"Batch cache lookup for {len(dois)} DOIs...")
+            cached_results = self.cache.get_many(cache_keys)
+
+            for doi, cache_key in doi_to_cache_key.items():
+                cached = cached_results.get(cache_key)
+                if cached is not None:
+                    # Extract metadata from cache format
+                    if isinstance(cached, pd.DataFrame) and len(cached) > 0:
+                        # Check if this is a cached negative result
+                        if 'error' in cached.columns:
+                            error_val = cached.iloc[0]['error']
+                            if error_val == 'not_found' or (error_val is not None and error_val != ''):
+                                # This is a cached negative result
+                                if retry_negative:
+                                    # Retry this DOI - don't use cached negative result
+                                    logger.debug(f"Retrying previously failed DOI: {doi}")
+                                    results[doi] = None  # Mark for fetching
+                                    continue
+                                else:
+                                    # Don't re-fetch - use cached negative result
+                                    logger.debug(f"Cached negative result for DOI: {doi}")
+                                    results[doi] = None
+                                    continue
+
+                        if 'data' in cached.columns:
+                            data = cached.iloc[0]['data']
+                            if isinstance(data, list) and len(data) > 0:
+                                results[doi] = data[0]
+                            else:
+                                results[doi] = data
+                        else:
+                            results[doi] = cached.iloc[0].to_dict()
+                    elif isinstance(cached, dict):
+                        results[doi] = cached
+                    else:
+                        results[doi] = None
+                else:
+                    results[doi] = None
+
+            # Filter to uncached DOIs (excluding cached negative results)
+            # We mark negative results with a special marker so we can distinguish them
+            negative_marker = object()  # Unique marker for negative cached results
+            for doi, cache_key in doi_to_cache_key.items():
+                cached = cached_results.get(cache_key)
+                if cached is not None and isinstance(cached, pd.DataFrame) and len(cached) > 0:
+                    if 'error' in cached.columns:
+                        error_val = cached.iloc[0]['error']
+                        if error_val == 'not_found' or (error_val is not None and error_val != ''):
+                            results[doi] = negative_marker
+
+            # Only fetch DOIs that are truly uncached (not negative cached)
+            uncached_dois = [doi for doi, result in results.items() if result != negative_marker and result is None]
+            # Convert negative markers back to None
+            for doi in results:
+                if results[doi] == negative_marker:
+                    results[doi] = None
+            num_cached = len(dois) - len(uncached_dois)
+            logger.info(f"Cache hits: {num_cached}/{len(dois)}, fetching {len(uncached_dois)} from API")
+        else:
+            # No batch cache or force refresh
+            uncached_dois = dois
+            results = {doi: None for doi in dois}
+
+        # Step 2: Fetch uncached DOIs from API
+        if uncached_dois:
+            if max_workers > 1:
+                # Parallel fetching with progress bar
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                logger.info(f"Fetching {len(uncached_dois)} DOIs in parallel (workers={max_workers})...")
+
+                # Import tqdm for progress bar
+                if show_progress:
+                    try:
+                        from tqdm.auto import tqdm
+                        pbar = tqdm(total=len(uncached_dois), desc="Fetching from API", unit="DOI")
+                    except ImportError:
+                        show_progress = False
+                        logger.warning("tqdm not installed, progress bar disabled")
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_doi = {
+                        executor.submit(self.fetch_by_doi, doi, force_refresh=True, cache_negative=cache_negative): doi
+                        for doi in uncached_dois
+                    }
+
+                    for future in as_completed(future_to_doi):
+                        doi = future_to_doi[future]
+                        try:
+                            result = future.result()
+                            results[doi] = result
+                        except Exception as e:
+                            logger.error(f"Error fetching DOI {doi}: {e}")
+                            results[doi] = None
+
+                        # Update progress bar
+                        if show_progress:
+                            pbar.update(1)
+
+                if show_progress:
+                    pbar.close()
+            else:
+                # Sequential fetching with progress bar
+                logger.info(f"Fetching {len(uncached_dois)} DOIs sequentially...")
+
+                if show_progress:
+                    try:
+                        from tqdm.auto import tqdm
+                        uncached_dois_iter = tqdm(uncached_dois, desc="Fetching from API", unit="DOI")
+                    except ImportError:
+                        uncached_dois_iter = uncached_dois
+                        logger.warning("tqdm not installed, progress bar disabled")
+                else:
+                    uncached_dois_iter = uncached_dois
+
+                for doi in uncached_dois_iter:
+                    results[doi] = self.fetch_by_doi(doi, force_refresh=True, cache_negative=cache_negative)
+
+        return results
 
 
 class CrossrefSearchFetcher(BaseSearchFetcher):
@@ -1093,14 +1308,14 @@ class CrossrefSearchFetcher(BaseSearchFetcher):
             rows_per_page=kwargs.get('rows_per_page', 100),
         )
         
-        # Initialize client and cache
+        # Initialize client and cache (using SQLite for faster metadata access)
         client = CrossrefSearchClient(config)
-        cache = LocalCache(
+        cache = SQLiteLocalCache(
             cache_dir=cache_dir,
             compression=True,
             max_age_days=kwargs.get('cache_max_age_days', None)
         )
-        
+
         super().__init__(client, cache)
         
         logger.info(f"Initialized Crossref fetcher with cache at {cache.cache_dir}")
