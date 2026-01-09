@@ -29,9 +29,28 @@ class DB():
         df_tables = pd.read_sql(f'SELECT name FROM sqlite_master WHERE type="table";', conn)
         conn.close()
         return df_tables['name'].to_list()
-    def read_sql(self, sql):
+    def read_sql(self, sql, params=None):
+        """
+        Execute SQL query and return results as DataFrame.
+
+        Args:
+            sql: SQL query string
+            params: Optional parameters for parameterized query (tuple, list, or dict)
+                   Use ? placeholders in SQL for SQLite, %s for MySQL
+
+        Returns:
+            DataFrame with query results
+
+        Examples:
+            # Simple query
+            df = db.read_sql("SELECT * FROM papers")
+
+            # Parameterized query (prevents SQL injection)
+            df = db.read_sql("SELECT * FROM papers WHERE year = ?", params=(2020,))
+            df = db.read_sql("SELECT * FROM papers WHERE year = ? AND type = ?", params=(2020, 'article'))
+        """
         cnx = self.get_conn()
-        df = pd.read_sql(sql, cnx)
+        df = pd.read_sql(sql, cnx, params=params)
         cnx.close()
         return df
     def write_sql(self, df, table_name, replace:bool=False, **kwargs):
@@ -426,9 +445,19 @@ class MySQL():
     def check_if_table_exists(self, tablename) -> bool:
         _df = self.read_sql(f'SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA="{self._db_name}" AND TABLE_NAME="{tablename}";')
         return len(_df) != 0
-    def read_sql(self, sql):
+    def read_sql(self, sql, params=None):
+        """
+        Execute SQL query and return results as DataFrame.
+
+        Args:
+            sql: SQL query string
+            params: Optional parameters for parameterized query
+
+        Returns:
+            DataFrame with query results
+        """
         cnx = self.get_conn()
-        df = pd.read_sql(self._sqlalchemy.text(sql), cnx)
+        df = pd.read_sql(self._sqlalchemy.text(sql), cnx, params=params)
         cnx.close()
         return df
     def write_sql(self, df, table_name, replace:bool=False, direct:bool=False, table_layout:dict=None):
