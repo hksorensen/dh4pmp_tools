@@ -84,7 +84,7 @@ class PDFFetcher:
     }
 
     @staticmethod
-    def load_config(config_path: Optional[str] = None) -> Dict:
+    def load_config(config_path: Optional[Union[str, Path]] = None) -> Dict:
         """
         Load configuration from YAML file.
 
@@ -105,7 +105,7 @@ class PDFFetcher:
 
         if config_path:
             # If explicit path provided, only try that
-            search_paths.append(Path(config_path))
+            search_paths.append(Path(config_path).expanduser())
         else:
             # Otherwise try standard locations
             search_paths.extend(
@@ -156,14 +156,14 @@ class PDFFetcher:
 
     def __init__(
         self,
-        output_dir: Optional[str] = None,
-        metadata_db_path: Optional[str] = None,
+        output_dir: Optional[Union[str, Path]] = None,
+        metadata_db_path: Optional[Union[str, Path]] = None,
         max_workers: Optional[int] = None,
         max_attempts: Optional[int] = None,
         timeout: Optional[int] = None,
         user_agent: Optional[str] = None,
         unpaywall_email: Optional[str] = None,
-        config_path: Optional[str] = None,
+        config_path: Optional[Union[str, Path]] = None,
         require_vpn: Optional[Union[str, List[str]]] = None,
     ):
         """
@@ -342,6 +342,43 @@ class PDFFetcher:
                 logger.info(f"Skipping {identifier}: {reason}")
                 return DownloadResult(identifier=identifier, status="skipped", error_reason=reason)
 
+        # Check if file already exists on filesystem but not in database
+        # This handles copied PDFs or files from other sources
+        sanitized_name = sanitize_doi_to_filename(identifier)
+        expected_path = self.output_dir / sanitized_name
+
+        if expected_path.exists() and not force:
+            logger.info(f"Found existing file for {identifier}: {expected_path}")
+
+            # Validate it's a real PDF
+            try:
+                with open(expected_path, "rb") as f:
+                    if f.read(4) == b"%PDF":
+                        # Register in database as pre-existing file
+                        if self.db:
+                            self.db.record_success(
+                                identifier=identifier,
+                                local_path=str(expected_path),
+                                publisher="Unknown (pre-existing file)",
+                                strategy_used="PreExistingFile",
+                                landing_url=f"https://doi.org/{identifier}",
+                                pdf_url="Pre-existing file",
+                                sanitized_filename=sanitized_name,
+                            )
+                            logger.info(f"✓ Registered existing file: {identifier}")
+
+                        return DownloadResult(
+                            identifier=identifier,
+                            status="success",
+                            local_path=expected_path,
+                            strategy_used="PreExistingFile",
+                            publisher="Unknown (pre-existing file)",
+                        )
+                    else:
+                        logger.warning(f"File exists but is not a valid PDF: {expected_path}")
+            except Exception as e:
+                logger.warning(f"Error validating existing file {expected_path}: {e}")
+
         # Select strategies to try
         if strategy_name:
             strategies_to_try = [
@@ -489,7 +526,7 @@ class PDFFetcher:
                 continue  # Try next strategy
 
         # All strategies failed
-        logger.error(f"All strategies failed for {identifier}. Last error: {last_error}")
+        logger.warning(f"All strategies failed for {identifier}. Last error: {last_error}")
 
         # Determine if should retry based on last strategy
         should_retry = (
