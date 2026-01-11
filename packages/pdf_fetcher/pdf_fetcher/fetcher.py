@@ -248,6 +248,19 @@ class PDFFetcher:
             logger.warning("postponed_cache module not found, skipping domain filtering")
             self.postponed_cache = None
 
+        # Initialize problem papers registry (for papers that hang/timeout)
+        try:
+            from .problem_papers import ProblemPapersRegistry
+
+            self.problem_papers = ProblemPapersRegistry()
+            stats = self.problem_papers.get_stats()
+            logger.info(
+                f"Problem papers registry initialized: {stats['total_blacklisted']} blacklisted"
+            )
+        except ImportError:
+            logger.warning("problem_papers module not found, skipping blacklist")
+            self.problem_papers = None
+
     def _load_strategies(self) -> List:
         """Load all available publisher strategies."""
         strategies = []
@@ -471,10 +484,27 @@ class PDFFetcher:
 
                 # Download PDF content properly with streaming
                 # IMPORTANT: Must iterate over chunks when stream=True to get complete file
+                # Add timeout protection for slow chunk reads
                 pdf_content = bytearray()
+                chunk_start_time = time.time()
+                download_stalled = False
+
                 for chunk in pdf_response.iter_content(chunk_size=8192):
+                    # Check if we've been downloading too long (per-chunk timeout)
+                    if time.time() - chunk_start_time > self.timeout:
+                        error = f"Download stalled (no progress for {self.timeout}s)"
+                        logger.warning(f"{strategy.__class__.__name__}: {error}")
+                        last_error = error
+                        download_stalled = True
+                        break
+
                     if chunk:  # filter out keep-alive chunks
                         pdf_content.extend(chunk)
+                        chunk_start_time = time.time()  # Reset timeout on progress
+
+                # Skip this strategy if download stalled
+                if download_stalled:
+                    continue  # Try next strategy
 
                 pdf_content = bytes(pdf_content)
 
@@ -598,6 +628,25 @@ class PDFFetcher:
                 )
                 pbar.refresh()
 
+        # Pre-filter blacklisted papers (papers that hang/timeout repeatedly)
+        blacklisted_identifiers = []
+        if self.problem_papers:
+            identifiers, blacklisted = self.problem_papers.filter_batch(identifiers)
+            blacklisted_identifiers = blacklisted
+
+            # Create skipped results for blacklisted papers
+            if blacklisted_identifiers:
+                for identifier in blacklisted_identifiers:
+                    reason = self.problem_papers.get_reason(identifier)
+                    results.append(
+                        DownloadResult(
+                            identifier=identifier,
+                            status="skipped",
+                            error_reason=f"Blacklisted (problem paper): {reason}",
+                        )
+                    )
+                    status_counts['postponed'] += 1
+
         # Pre-filter using postponed domains cache (skip known Cloudflare/blocked sources)
         postponed_identifiers = []
         if self.postponed_cache:
@@ -618,7 +667,7 @@ class PDFFetcher:
 
             # Continue with processable identifiers only
             identifiers = processable
-            total = len(identifiers) + len(postponed_identifiers)  # Update total for progress bar
+            total = len(identifiers) + len(postponed_identifiers) + len(blacklisted_identifiers)  # Update total for progress bar
 
         # Batch check download status (one DB query instead of N queries)
         # Skip status check if force=True (re-download everything)
@@ -689,8 +738,9 @@ class PDFFetcher:
                 for future in as_completed(future_to_id):
                     identifier = future_to_id[future]
                     try:
-                        # Add timeout to prevent infinite hang (3x normal timeout)
-                        result = future.result(timeout=self.timeout * 3)
+                        # Aggressive timeout to prevent infinite hang
+                        # Use shorter timeout (2x instead of 3x) to catch hangs faster
+                        result = future.result(timeout=self.timeout * 2)
                         results.append(result)
 
                         # Track status for progress bar
@@ -708,14 +758,34 @@ class PDFFetcher:
                             status_counts['skipped'] += 1
 
                     except TimeoutError:
-                        logger.error(f"Timeout waiting for result: {identifier}")
+                        # Thread is still running but we've given up waiting
+                        logger.error(f"⏱ TIMEOUT: {identifier} hung for {self.timeout * 2}s (thread may still be running)")
+
+                        # Automatically blacklist papers that timeout
+                        if self.problem_papers:
+                            self.problem_papers.add(
+                                identifier,
+                                reason=f"Download hung (timeout after {self.timeout * 2}s)"
+                            )
+                            logger.error(f"   🚫 Paper blacklisted to prevent future hangs")
+                        else:
+                            logger.error(f"   Consider adding to blacklist: {identifier}")
+
                         result = DownloadResult(
                             identifier=identifier,
                             status="failure",
-                            error_reason=f"Hung for {self.timeout * 3}s",
+                            error_reason=f"Download hung (timeout after {self.timeout * 2}s)",
                         )
                         results.append(result)
                         status_counts['failure'] += 1
+
+                        # Record in database as failed to prevent retry
+                        if self.db:
+                            self.db.record_failure(
+                                identifier,
+                                f"Download hung (timeout after {self.timeout * 2}s)",
+                                should_retry=False  # Don't retry hanging downloads
+                            )
                     except Exception as e:
                         logger.error(f"Error processing {identifier}: {e}")
                         result = DownloadResult(

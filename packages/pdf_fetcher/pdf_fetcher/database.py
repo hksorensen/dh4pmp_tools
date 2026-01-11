@@ -206,7 +206,7 @@ class DownloadMetadataDB:
             pdf_url: PDF URL
             sanitized_filename: Sanitized filename
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now().isoformat()
 
         with self._get_connection() as conn:
             # Check if exists
@@ -296,7 +296,7 @@ class DownloadMetadataDB:
             cloudflare_detected: Was Cloudflare detected?
             should_retry: Should we retry later? (False for paywalls)
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now().isoformat()
 
         with self._get_connection() as conn:
             existing = conn.execute(
@@ -497,7 +497,7 @@ class DownloadMetadataDB:
                     record.get("error_reason"),
                     record.get("cloudflare_detected", False),
                     record.get("status") != "success",  # Retry failures
-                    datetime.utcnow().isoformat(),
+                    datetime.now().isoformat(),
                 ),
             )
 
@@ -1158,7 +1158,7 @@ class DownloadMetadataDB:
             logger.warning(f"Identifier {identifier} already exists in database")
             return identifier
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now().isoformat()
 
         with self._get_connection() as conn:
             conn.execute(
