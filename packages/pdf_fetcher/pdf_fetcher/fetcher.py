@@ -569,6 +569,15 @@ class PDFFetcher:
         results = []
         total = len(identifiers)
 
+        # Track status counts for progress bar
+        status_counts = {
+            'success': 0,
+            'skipped': 0,
+            'failure': 0,
+            'postponed': 0,
+            'pre_existing': 0,
+        }
+
         # Set up progress bar if requested
         pbar = None
         if show_progress and progress_callback is None:
@@ -576,6 +585,15 @@ class PDFFetcher:
 
             def progress_callback(completed, total):
                 pbar.n = completed
+                # Update postfix with status icons
+                pbar.set_postfix_str(
+                    f"✓ {status_counts['success']} "
+                    f"⊙ {status_counts['skipped']} "
+                    f"⊕ {status_counts['pre_existing']} "
+                    f"✗ {status_counts['failure']} "
+                    f"⏸ {status_counts['postponed']}",
+                    refresh=False
+                )
                 pbar.refresh()
 
         # Pre-filter using postponed domains cache (skip known Cloudflare/blocked sources)
@@ -594,6 +612,7 @@ class PDFFetcher:
                             error_reason="Skipped: Domain/DOI prefix in postponed cache (known Cloudflare/access issues)",
                         )
                     )
+                    status_counts['postponed'] += 1
 
             # Continue with processable identifiers only
             identifiers = processable
@@ -648,6 +667,7 @@ class PDFFetcher:
                 results.append(
                     DownloadResult(identifier=identifier, status="skipped", error_reason=reason)
                 )
+                status_counts['skipped'] += 1
                 completed_count += 1
                 if progress_callback:
                     progress_callback(completed_count, total)
@@ -670,22 +690,37 @@ class PDFFetcher:
                         # Add timeout to prevent infinite hang (3x normal timeout)
                         result = future.result(timeout=self.timeout * 3)
                         results.append(result)
+
+                        # Track status for progress bar
+                        if result.status == 'success':
+                            # Distinguish between newly downloaded and pre-existing files
+                            if result.strategy_used == 'PreExistingFile':
+                                status_counts['pre_existing'] += 1
+                            else:
+                                status_counts['success'] += 1
+                        elif result.status == 'failure':
+                            status_counts['failure'] += 1
+                        elif result.status == 'postponed':
+                            status_counts['postponed'] += 1
+                        elif result.status == 'skipped':
+                            status_counts['skipped'] += 1
+
                     except TimeoutError:
                         logger.error(f"Timeout waiting for result: {identifier}")
-                        results.append(
-                            DownloadResult(
-                                identifier=identifier,
-                                status="failure",
-                                error_reason=f"Hung for {self.timeout * 3}s",
-                            )
+                        result = DownloadResult(
+                            identifier=identifier,
+                            status="failure",
+                            error_reason=f"Hung for {self.timeout * 3}s",
                         )
+                        results.append(result)
+                        status_counts['failure'] += 1
                     except Exception as e:
                         logger.error(f"Error processing {identifier}: {e}")
-                        results.append(
-                            DownloadResult(
-                                identifier=identifier, status="failure", error_reason=str(e)
-                            )
+                        result = DownloadResult(
+                            identifier=identifier, status="failure", error_reason=str(e)
                         )
+                        results.append(result)
+                        status_counts['failure'] += 1
 
                     completed_count += 1
                     if progress_callback:
@@ -697,6 +732,15 @@ class PDFFetcher:
         # Close progress bar if we created one
         if pbar:
             pbar.close()
+            # Print summary with icons
+            logger.info(
+                f"Download summary: "
+                f"✓ {status_counts['success']} downloaded, "
+                f"⊕ {status_counts['pre_existing']} pre-existing, "
+                f"⊙ {status_counts['skipped']} skipped, "
+                f"✗ {status_counts['failure']} failed, "
+                f"⏸ {status_counts['postponed']} postponed"
+            )
 
         # Analyze results to update postponed domains cache
         if self.postponed_cache and results:
