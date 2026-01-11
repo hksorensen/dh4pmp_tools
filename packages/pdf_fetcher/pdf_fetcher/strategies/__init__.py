@@ -2,6 +2,7 @@
 
 from pdf_fetcher.strategies.base import DownloadStrategy
 from pdf_fetcher.strategies.unpaywall import UnpaywallStrategy
+from pdf_fetcher.strategies.arxiv import ArxivStrategy
 from pdf_fetcher.strategies.elsevier_tdm import ElsevierTDMStrategy
 from pdf_fetcher.strategies.elsevier import ElsevierStrategy
 from pdf_fetcher.strategies.springer import SpringerStrategy
@@ -12,6 +13,7 @@ from pdf_fetcher.strategies.generic import GenericStrategy
 __all__ = [
     'DownloadStrategy',
     'UnpaywallStrategy',
+    'ArxivStrategy',
     'ElsevierTDMStrategy',
     'ElsevierStrategy',
     'SpringerStrategy',

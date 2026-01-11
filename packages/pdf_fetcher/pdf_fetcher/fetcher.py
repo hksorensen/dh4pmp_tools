@@ -255,6 +255,7 @@ class PDFFetcher:
         try:
             from .strategies import (
                 UnpaywallStrategy,
+                ArxivStrategy,
                 ElsevierTDMStrategy,
                 ElsevierStrategy,
                 SpringerStrategy,
@@ -266,6 +267,7 @@ class PDFFetcher:
             strategies.extend(
                 [
                     UnpaywallStrategy(email=self.unpaywall_email),  # Try OA first!
+                    ArxivStrategy(),  # ArXiv preprints (priority 5)
                     ElsevierTDMStrategy(),  # TDM API (priority 5) - tries before scraping
                     ElsevierStrategy(),  # Scraping fallback (priority 10)
                     SpringerStrategy(),
