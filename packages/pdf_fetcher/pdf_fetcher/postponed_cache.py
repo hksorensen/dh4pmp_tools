@@ -48,6 +48,7 @@ class PostponedDomainsCache:
         # In-memory sets for fast lookups
         self.blocked_domains: Set[str] = set()
         self.blocked_doi_prefixes: Set[str] = set()
+        self.blocked_papers: Set[str] = set()  # Individual papers that timeout/hang
 
         # Initialize database storage
         self._init_storage()
@@ -96,15 +97,31 @@ class PostponedDomainsCache:
                 }
             )
 
+            # Individual paper storage (for papers that hang/timeout)
+            self.paper_storage = SQLiteTableStorage(
+                db_path=str(self.db_path),
+                table_name='postponed_papers',
+                column_ID='identifier',
+                ID_type=str,
+                table_layout={
+                    'identifier': 'TEXT PRIMARY KEY',
+                    'reason': 'TEXT',
+                    'first_detected': 'TEXT',
+                    'last_detected': 'TEXT',
+                    'detection_count': 'INTEGER DEFAULT 1'
+                }
+            )
+
             logger.info(f"Initialized postponed domains cache: {self.db_path}")
 
         except ImportError as e:
             logger.warning(f"db_utils not available, using in-memory cache only: {e}")
             self.domain_storage = None
             self.prefix_storage = None
+            self.paper_storage = None
 
     def _load_from_db(self):
-        """Load existing blocked domains and prefixes from database."""
+        """Load existing blocked domains, prefixes, and papers from database."""
         if self.domain_storage is None:
             return
 
@@ -122,6 +139,13 @@ class PostponedDomainsCache:
                 if prefixes_df is not None and len(prefixes_df) > 0:
                     self.blocked_doi_prefixes = set(prefixes_df['prefix'].tolist())
                     logger.info(f"Loaded {len(self.blocked_doi_prefixes)} postponed DOI prefixes from cache")
+
+            # Load individual papers
+            if hasattr(self, 'paper_storage') and self.paper_storage.exists():
+                papers_df = self.paper_storage.get()
+                if papers_df is not None and len(papers_df) > 0:
+                    self.blocked_papers = set(papers_df['identifier'].tolist())
+                    logger.info(f"Loaded {len(self.blocked_papers)} postponed papers from cache")
 
         except Exception as e:
             logger.warning(f"Failed to load postponed domains from database: {e}")
@@ -222,6 +246,54 @@ class PostponedDomainsCache:
             except Exception as e:
                 logger.warning(f"Failed to persist postponed DOI prefix {prefix}: {e}")
 
+    def add_paper(self, identifier: str, reason: str = "Download timeout/hang"):
+        """
+        Add individual paper to blocked list (for papers that hang/timeout).
+
+        Args:
+            identifier: Paper identifier (DOI, etc.)
+            reason: Reason for blocking
+        """
+        if not identifier or identifier in self.blocked_papers:
+            return
+
+        self.blocked_papers.add(identifier)
+
+        # Persist to database
+        if hasattr(self, 'paper_storage') and self.paper_storage is not None:
+            try:
+                import pandas as pd
+                timestamp = datetime.now().isoformat()
+
+                # Check if paper already exists
+                existing = self.paper_storage.get(IDs=[identifier])
+
+                if existing is not None and len(existing) > 0:
+                    # Update detection count
+                    count = existing.iloc[0]['detection_count'] + 1
+                    df = pd.DataFrame([{
+                        'identifier': identifier,
+                        'reason': reason,
+                        'first_detected': existing.iloc[0]['first_detected'],
+                        'last_detected': timestamp,
+                        'detection_count': count
+                    }])
+                else:
+                    # New paper
+                    df = pd.DataFrame([{
+                        'identifier': identifier,
+                        'reason': reason,
+                        'first_detected': timestamp,
+                        'last_detected': timestamp,
+                        'detection_count': 1
+                    }])
+
+                self.paper_storage.write(df, timestamp=False)
+                logger.warning(f"🚫 Postponed paper (timeout): {identifier}")
+
+            except Exception as e:
+                logger.warning(f"Failed to persist postponed paper {identifier}: {e}")
+
     def should_skip_doi(self, doi: str) -> Tuple[bool, Optional[str]]:
         """
         Check if DOI should be skipped based on prefix.
@@ -286,6 +358,11 @@ class PostponedDomainsCache:
         blocked = []
 
         for identifier in identifiers:
+            # Check if individual paper is blocked (timeout/hang)
+            if identifier in self.blocked_papers:
+                blocked.append(identifier)
+                continue
+
             # Check if DOI prefix is blocked
             skip_doi, reason_doi = self.should_skip_doi(identifier)
             if skip_doi:
@@ -396,14 +473,16 @@ class PostponedDomainsCache:
         return {
             'blocked_domains': len(self.blocked_domains),
             'blocked_doi_prefixes': len(self.blocked_doi_prefixes),
+            'blocked_papers': len(self.blocked_papers),
             'domains': sorted(list(self.blocked_domains)),
             'doi_prefixes': sorted(list(self.blocked_doi_prefixes))
         }
 
     def clear(self):
-        """Clear all postponed domains and prefixes (use with caution)."""
+        """Clear all postponed domains, prefixes, and papers (use with caution)."""
         self.blocked_domains.clear()
         self.blocked_doi_prefixes.clear()
+        self.blocked_papers.clear()
 
         # Also clear from database
         if self.domain_storage is not None:
@@ -417,6 +496,11 @@ class PostponedDomainsCache:
                 if all_prefixes:
                     self.prefix_storage.delete(all_prefixes)
 
-                logger.info("Cleared postponed domains cache")
+                if hasattr(self, 'paper_storage') and self.paper_storage is not None:
+                    all_papers = self.paper_storage.get_ID_list()
+                    if all_papers:
+                        self.paper_storage.delete(all_papers)
+
+                logger.info("Cleared postponed cache (domains, prefixes, papers)")
             except Exception as e:
                 logger.warning(f"Failed to clear database cache: {e}")

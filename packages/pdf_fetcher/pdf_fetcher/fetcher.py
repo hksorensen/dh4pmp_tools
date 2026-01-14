@@ -23,6 +23,30 @@ from .utils import sanitize_doi_to_filename
 logger = logging.getLogger(__name__)
 
 
+def _deep_merge(base: Dict, override: Dict) -> Dict:
+    """
+    Deep merge two dictionaries, with override taking precedence.
+    
+    Args:
+        base: Base dictionary (defaults)
+        override: Override dictionary (will overwrite base values)
+    
+    Returns:
+        Merged dictionary
+    """
+    result = base.copy()
+    
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            # Recursively merge nested dictionaries
+            result[key] = _deep_merge(result[key], value)
+        else:
+            # Override with new value (or add new key)
+            result[key] = value
+    
+    return result
+
+
 @dataclass
 class DownloadResult:
     """Result of a PDF download attempt."""
@@ -86,54 +110,73 @@ class PDFFetcher:
     @staticmethod
     def load_config(config_path: Optional[Union[str, Path]] = None) -> Dict:
         """
-        Load configuration from YAML file.
+        Load configuration from YAML files with defaults and overrides.
 
-        Searches for config in this order:
-        1. Explicit config_path (if provided)
-        2. ./config.yaml (current directory)
-        3. ~/.config/pdf_fetcher/config.yaml (user config)
-        4. Package default config
+        Configuration is loaded in layers, with later layers overriding earlier ones:
+        1. Package default config (in pdf_fetcher package directory) - ALWAYS loaded as base defaults
+        2. User global config (~/.config/pdf_fetcher/config.yaml) - Merged on top as user defaults
+        3. Explicit config_path (if provided) or local config.yaml - Merged on top as final overrides
+
+        This allows:
+        - Package defaults to provide baseline configuration
+        - User config to set personal preferences globally
+        - Local/project config to override for specific projects
 
         Args:
-            config_path: Path to config file (optional)
+            config_path: Path to config file (optional). If provided, used as final override.
+                        If not provided, checks for ./config.yaml as final override.
 
         Returns:
-            Dictionary with config values
+            Dictionary with merged config values
         """
-        # Build list of paths to try
-        search_paths = []
-
+        config = {}
+        
+        # Step 1: Load package default config (always as base defaults)
+        package_config_path = Path(__file__).parent / "config.yaml"
+        if package_config_path.exists():
+            try:
+                with open(package_config_path, "r") as f:
+                    package_config = yaml.safe_load(f) or {}
+                config = _deep_merge(config, package_config)
+                logger.debug(f"Loaded package defaults from {package_config_path.resolve()}")
+            except Exception as e:
+                logger.warning(f"Failed to load package default config from {package_config_path.resolve()}: {e}")
+        
+        # Step 2: Load user global config (merge on top as user defaults)
+        user_config_path = Path.home() / ".config" / "pdf_fetcher" / "config.yaml"
+        if user_config_path.exists():
+            try:
+                with open(user_config_path, "r") as f:
+                    user_config = yaml.safe_load(f) or {}
+                config = _deep_merge(config, user_config)
+                logger.debug(f"Loaded user config from {user_config_path.resolve()}")
+            except Exception as e:
+                logger.warning(f"Failed to load user config from {user_config_path.resolve()}: {e}")
+        
+        # Step 3: Load override config (merge on top as final overrides)
+        override_config_path = None
         if config_path:
-            # If explicit path provided, only try that
-            search_paths.append(Path(config_path).expanduser())
+            # Explicit path provided - use as override
+            override_config_path = Path(config_path).expanduser()
         else:
-            # Otherwise try standard locations
-            search_paths.extend(
-                [
-                    Path("./config.yaml"),  # Current directory
-                    Path.home() / ".config" / "pdf_fetcher" / "config.yaml",  # User config
-                    Path(__file__).parent / "config.yaml",  # Package default
-                ]
-            )
-
-        # Try each path in order
-        for config_file in search_paths:
-            if config_file.exists():
-                try:
-                    with open(config_file, "r") as f:
-                        config = yaml.safe_load(f)
-                    logger.info(f"Loaded config from {config_file.resolve()}")
-                    return config or {}
-                except Exception as e:
-                    logger.error(f"Failed to load config from {config_file.resolve()}: {e}")
-                    continue
-
-        # No config found
-        if config_path:
-            logger.warning(f"Config file {config_path} not found, using defaults")
-        else:
-            logger.info("No config file found, using defaults")
-        return {}
+            # Check for local config.yaml as override
+            local_config_path = Path("./config.yaml").resolve()
+            if local_config_path.exists():
+                override_config_path = local_config_path
+        
+        if override_config_path and override_config_path.exists():
+            try:
+                with open(override_config_path, "r") as f:
+                    override_config = yaml.safe_load(f) or {}
+                config = _deep_merge(config, override_config)
+                logger.info(f"Loaded override config from {override_config_path.resolve()}")
+            except Exception as e:
+                logger.error(f"Failed to load override config from {override_config_path.resolve()}: {e}")
+        elif config_path:
+            # Explicit path provided but doesn't exist
+            logger.warning(f"Override config file {config_path} not found, using defaults only")
+        
+        return config
 
     @staticmethod
     def get_publisher_from_doi(doi: str) -> str:
@@ -165,6 +208,7 @@ class PDFFetcher:
         unpaywall_email: Optional[str] = None,
         config_path: Optional[Union[str, Path]] = None,
         require_vpn: Optional[Union[str, List[str]]] = None,
+        arxiv_cooldown: Optional[float] = None,
     ):
         """
         Initialize PDF fetcher.
@@ -181,9 +225,12 @@ class PDFFetcher:
             require_vpn: University IP prefix(es) to check before downloads.
                         Can be string ("130.225") or list (["130.225", "130.226"]).
                         If set, VPN will be checked before actual downloads.
+            arxiv_cooldown: Minimum seconds between ArXiv requests (default: from config or 1.0)
+                           Set to 0 to disable rate limiting (not recommended)
         """
         # Load config file
         config = self.load_config(config_path)
+        self.config = config  # Store for later use (e.g., in _load_strategies)
 
         # Apply settings with priority: args > config > defaults
         self.output_dir = Path(output_dir or config.get("output_dir", "./pdfs"))
@@ -211,6 +258,10 @@ class PDFFetcher:
 
         # Store VPN requirement
         self.require_vpn = require_vpn
+
+        # Store ArXiv cooldown with priority: args > config > defaults
+        arxiv_config = config.get("arxiv", {})
+        self.arxiv_cooldown = arxiv_cooldown if arxiv_cooldown is not None else arxiv_config.get("cooldown", 1.0)
 
         # Load strategies
         self.strategies = self._load_strategies()
@@ -241,25 +292,14 @@ class PDFFetcher:
             self.postponed_cache = PostponedDomainsCache()
             stats = self.postponed_cache.get_stats()
             logger.info(
-                f"Postponed domains cache initialized: "
-                f"{stats['blocked_domains']} domains, {stats['blocked_doi_prefixes']} DOI prefixes"
+                f"Postponed cache initialized: "
+                f"{stats['blocked_domains']} domains, "
+                f"{stats['blocked_doi_prefixes']} prefixes, "
+                f"{stats['blocked_papers']} papers"
             )
         except ImportError:
-            logger.warning("postponed_cache module not found, skipping domain filtering")
+            logger.warning("postponed_cache module not found, skipping postponed filtering")
             self.postponed_cache = None
-
-        # Initialize problem papers registry (for papers that hang/timeout)
-        try:
-            from .problem_papers import ProblemPapersRegistry
-
-            self.problem_papers = ProblemPapersRegistry()
-            stats = self.problem_papers.get_stats()
-            logger.info(
-                f"Problem papers registry initialized: {stats['total_blacklisted']} blacklisted"
-            )
-        except ImportError:
-            logger.warning("problem_papers module not found, skipping blacklist")
-            self.problem_papers = None
 
     def _load_strategies(self) -> List:
         """Load all available publisher strategies."""
@@ -277,10 +317,11 @@ class PDFFetcher:
                 GenericStrategy,
             )
 
+            # Use ArXiv cooldown from instance (already resolved: args > config > defaults)
             strategies.extend(
                 [
                     UnpaywallStrategy(email=self.unpaywall_email),  # Try OA first!
-                    ArxivStrategy(),  # ArXiv preprints (priority 5)
+                    ArxivStrategy(cooldown=self.arxiv_cooldown),  # ArXiv preprints (priority 5)
                     ElsevierTDMStrategy(),  # TDM API (priority 5) - tries before scraping
                     ElsevierStrategy(),  # Scraping fallback (priority 10)
                     SpringerStrategy(),
@@ -303,6 +344,19 @@ class PDFFetcher:
             if strategy.can_handle(identifier):
                 return strategy
         return None
+
+    def _is_arxiv_identifier(self, identifier: str) -> bool:
+        """
+        Check if identifier is from ArXiv.
+
+        Returns:
+            True if this is an ArXiv paper
+        """
+        # Find ArXiv strategy and check if it can handle this identifier
+        for strategy in self.strategies:
+            if strategy.__class__.__name__ == "ArxivStrategy":
+                return strategy.can_handle(identifier)
+        return False
 
     def should_download(self, identifier: str) -> Tuple[bool, Optional[str]]:
         """
@@ -439,6 +493,7 @@ class PDFFetcher:
         # Try each strategy in order until one succeeds
         last_error = None
         last_strategy = None
+        last_postpone_reason = None  # Track if any strategy wants to postpone
 
         for strategy in strategies_to_try:
             logger.debug(f"Trying {strategy.__class__.__name__} for {identifier}")
@@ -510,7 +565,27 @@ class PDFFetcher:
 
                 # Validate PDF
                 if not pdf_content.startswith(b"%PDF"):
-                    error = "Downloaded file is not a PDF"
+                    # Check if we got HTML instead (common with captchas/rate limiting)
+                    is_html = pdf_content.startswith(b"<!DOCTYPE") or pdf_content.startswith(b"<html")
+
+                    if is_html:
+                        # Try to decode HTML for captcha detection
+                        try:
+                            html_content = pdf_content[:5000].decode('utf-8', errors='ignore')
+                        except:
+                            html_content = ""
+
+                        error = f"Downloaded file is HTML, not PDF (possible captcha/rate limiting)"
+
+                        # Check if strategy wants to postpone (e.g., for captchas)
+                        if strategy.should_postpone(error, html_content):
+                            logger.warning(f"{strategy.__class__.__name__}: {error}, postponing")
+                            last_error = error
+                            last_postpone_reason = error
+                            continue  # Try next strategy (or postpone if all fail)
+                    else:
+                        error = f"Downloaded file is not a PDF"
+
                     logger.warning(f"{strategy.__class__.__name__}: {error}, trying next strategy")
                     last_error = error
                     continue  # Try next strategy
@@ -560,10 +635,15 @@ class PDFFetcher:
         # All strategies failed
         logger.warning(f"All strategies failed for {identifier}. Last error: {last_error}")
 
-        # Determine if should retry based on last strategy
-        should_retry = (
-            last_strategy.should_postpone(last_error) if last_strategy and last_error else False
-        )
+        # Determine if should retry based on last strategy or postpone reason
+        should_retry = False
+        if last_postpone_reason:
+            # A strategy explicitly wanted to postpone (e.g., detected captcha)
+            should_retry = True
+            logger.info(f"Postponing {identifier}: {last_postpone_reason}")
+        elif last_strategy and last_error:
+            # Check if last strategy thinks error is temporary
+            should_retry = last_strategy.should_postpone(last_error)
 
         if self.db:
             self.db.record_failure(
@@ -583,6 +663,7 @@ class PDFFetcher:
         progress_callback: Optional[Callable[[int, int], None]] = None,
         show_progress: bool = True,
         force: bool = False,
+        batch_size: int = 1000,
     ) -> List[DownloadResult]:
         """
         Fetch multiple PDFs in parallel.
@@ -592,6 +673,9 @@ class PDFFetcher:
             progress_callback: Optional callback(completed, total)
             show_progress: If True, show tqdm progress bar (default: True)
             force: If True, re-download PDFs even if already successfully downloaded (default: False)
+            batch_size: Number of identifiers to process per batch (default: 1000).
+                       Processing in batches helps avoid memory issues and thread pool exhaustion
+                       when downloading large numbers of PDFs.
 
         Returns:
             List of DownloadResults
@@ -628,26 +712,7 @@ class PDFFetcher:
                 )
                 pbar.refresh()
 
-        # Pre-filter blacklisted papers (papers that hang/timeout repeatedly)
-        blacklisted_identifiers = []
-        if self.problem_papers:
-            identifiers, blacklisted = self.problem_papers.filter_batch(identifiers)
-            blacklisted_identifiers = blacklisted
-
-            # Create skipped results for blacklisted papers
-            if blacklisted_identifiers:
-                for identifier in blacklisted_identifiers:
-                    reason = self.problem_papers.get_reason(identifier)
-                    results.append(
-                        DownloadResult(
-                            identifier=identifier,
-                            status="skipped",
-                            error_reason=f"Blacklisted (problem paper): {reason}",
-                        )
-                    )
-                    status_counts['postponed'] += 1
-
-        # Pre-filter using postponed domains cache (skip known Cloudflare/blocked sources)
+        # Pre-filter using postponed cache (skip known Cloudflare/blocked sources and problem papers)
         postponed_identifiers = []
         if self.postponed_cache:
             processable, blocked = self.postponed_cache.filter_batch(identifiers)
@@ -667,7 +732,7 @@ class PDFFetcher:
 
             # Continue with processable identifiers only
             identifiers = processable
-            total = len(identifiers) + len(postponed_identifiers) + len(blacklisted_identifiers)  # Update total for progress bar
+            total = len(identifiers) + len(postponed_identifiers)  # Update total for progress bar
 
         # Batch check download status (one DB query instead of N queries)
         # Skip status check if force=True (re-download everything)
@@ -725,81 +790,184 @@ class PDFFetcher:
             else:
                 to_download.append(identifier)
 
-        # Download the remaining identifiers in parallel
+        # Download the remaining identifiers in parallel, processing in batches
         if to_download:
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit only identifiers that need downloading
-                future_to_id = {
-                    executor.submit(self.fetch, identifier, force=force): identifier
-                    for identifier in to_download
-                }
+            logger.info(f"Starting parallel downloads for {len(to_download)} papers (batch size: {batch_size})")
+            
+            # Split into batches
+            num_batches = (len(to_download) + batch_size - 1) // batch_size  # Ceiling division
+            if num_batches > 1:
+                logger.info(f"Processing {len(to_download)} identifiers in {num_batches} batches of up to {batch_size} each")
+            
+            for batch_num, batch_start in enumerate(range(0, len(to_download), batch_size), 1):
+                batch_end = min(batch_start + batch_size, len(to_download))
+                batch_identifiers = to_download[batch_start:batch_end]
+                
+                if num_batches > 1:
+                    logger.info(f"Processing batch {batch_num}/{num_batches} ({len(batch_identifiers)} identifiers)")
+                
+                # Check for ArXiv rate limiting and filter out ArXiv identifiers if needed
+                # Import ArxivStrategy to check rate limit flag
+                from .strategies.arxiv import ArxivStrategy
 
-                # Collect results as they complete
-                for future in as_completed(future_to_id):
-                    identifier = future_to_id[future]
+                batch_to_submit = []
+                arxiv_skipped = []
+
+                for identifier in batch_identifiers:
+                    # Check if this is ArXiv and if ArXiv is rate limited
+                    if self._is_arxiv_identifier(identifier) and ArxivStrategy.is_rate_limited():
+                        # Skip this ArXiv paper - add to postponed results
+                        arxiv_skipped.append(identifier)
+                    else:
+                        batch_to_submit.append(identifier)
+
+                # Create postponed results for skipped ArXiv papers
+                if arxiv_skipped:
+                    logger.warning(f"⏸ Skipping {len(arxiv_skipped)} ArXiv papers (rate limit active)")
+                    for identifier in arxiv_skipped:
+                        results.append(
+                            DownloadResult(
+                                identifier=identifier,
+                                status="postponed",
+                                error_reason="ArXiv rate limited - batch paused to avoid hammering servers",
+                            )
+                        )
+                        status_counts['postponed'] += 1
+                        completed_count += 1
+                        if progress_callback:
+                            progress_callback(completed_count, total)
+
+                # Use manual executor management (not context manager) to allow shutdown(wait=False) on timeout
+                executor = ThreadPoolExecutor(max_workers=self.max_workers)
+                timed_out = False
+                try:
+                    # Submit only identifiers that need downloading (and aren't rate-limited ArXiv)
+                    future_to_id = {
+                        executor.submit(self.fetch, identifier, force=force): identifier
+                        for identifier in batch_to_submit
+                    }
+                    logger.debug(f"Submitted {len(future_to_id)} download tasks for batch {batch_num}")
+
+                    # Collect results as they complete
+                    # IMPORTANT: as_completed() can block forever if a future never completes
+                    # Add timeout to force it to stop waiting (though thread will keep running)
                     try:
-                        # Aggressive timeout to prevent infinite hang
-                        # Use shorter timeout (2x instead of 3x) to catch hangs faster
-                        result = future.result(timeout=self.timeout * 2)
-                        results.append(result)
+                        for future in as_completed(future_to_id, timeout=self.timeout * 3):
+                            identifier = future_to_id[future]
+                            try:
+                                # Aggressive timeout to prevent infinite hang
+                                # Use shorter timeout (2x instead of 3x) to catch hangs faster
+                                result = future.result(timeout=self.timeout * 2)
+                                results.append(result)
 
-                        # Track status for progress bar
-                        if result.status == 'success':
-                            # Distinguish between newly downloaded and pre-existing files
-                            if result.strategy_used == 'PreExistingFile':
-                                status_counts['pre_existing'] += 1
-                            else:
-                                status_counts['success'] += 1
-                        elif result.status == 'failure':
-                            status_counts['failure'] += 1
-                        elif result.status == 'postponed':
-                            status_counts['postponed'] += 1
-                        elif result.status == 'skipped':
-                            status_counts['skipped'] += 1
+                                # Track status for progress bar
+                                if result.status == 'success':
+                                    # Distinguish between newly downloaded and pre-existing files
+                                    if result.strategy_used == 'PreExistingFile':
+                                        status_counts['pre_existing'] += 1
+                                    else:
+                                        status_counts['success'] += 1
+                                elif result.status == 'failure':
+                                    status_counts['failure'] += 1
+                                elif result.status == 'postponed':
+                                    status_counts['postponed'] += 1
+                                elif result.status == 'skipped':
+                                    status_counts['skipped'] += 1
+
+                            except TimeoutError:
+                                # Thread is still running but we've given up waiting
+                                logger.error(f"⏱ TIMEOUT: {identifier} hung for {self.timeout * 2}s (thread may still be running)")
+                                logger.error(f"   This paper will be marked as failed and postponed")
+
+                                # Automatically postpone papers that timeout
+                                if self.postponed_cache:
+                                    self.postponed_cache.add_paper(
+                                        identifier,
+                                        reason=f"Download hung (timeout after {self.timeout * 2}s)"
+                                    )
+                                    logger.warning(f"   🚫 Paper added to postponed cache: {identifier}")
+                                else:
+                                    logger.error(f"   Consider postponing paper: {identifier}")
+
+                                result = DownloadResult(
+                                    identifier=identifier,
+                                    status="failure",
+                                    error_reason=f"Download hung (timeout after {self.timeout * 2}s)",
+                                )
+                                results.append(result)
+                                status_counts['failure'] += 1
+
+                                # Record in database as failed to prevent retry
+                                if self.db:
+                                    self.db.record_failure(
+                                        identifier,
+                                        f"Download hung (timeout after {self.timeout * 2}s)",
+                                        should_retry=False  # Don't retry hanging downloads
+                                    )
+                            except Exception as e:
+                                logger.error(f"Error processing {identifier}: {e}")
+                                result = DownloadResult(
+                                    identifier=identifier, status="failure", error_reason=str(e)
+                                )
+                                results.append(result)
+                                status_counts['failure'] += 1
+
+                            completed_count += 1
+                            if progress_callback:
+                                progress_callback(completed_count, total)
+
+                            # Brief pause to avoid hammering servers
+                            time.sleep(0.1)
 
                     except TimeoutError:
-                        # Thread is still running but we've given up waiting
-                        logger.error(f"⏱ TIMEOUT: {identifier} hung for {self.timeout * 2}s (thread may still be running)")
+                        # as_completed() timed out - some futures never completed
+                        timed_out = True
+                        logger.error(f"⏱ as_completed() TIMEOUT after {self.timeout * 3}s (batch {batch_num})")
+                        logger.error(f"   {len(future_to_id)} tasks were submitted, {len([f for f in future_to_id.keys() if f.done()])} completed")
 
-                        # Automatically blacklist papers that timeout
-                        if self.problem_papers:
-                            self.problem_papers.add(
-                                identifier,
-                                reason=f"Download hung (timeout after {self.timeout * 2}s)"
-                            )
-                            logger.error(f"   🚫 Paper blacklisted to prevent future hangs")
-                        else:
-                            logger.error(f"   Consider adding to blacklist: {identifier}")
+                        # Find which DOIs didn't complete
+                        pending_dois = []
+                        for future, doi in future_to_id.items():
+                            if not future.done():
+                                pending_dois.append(doi)
+                                logger.error(f"   🚫 Still running: {doi}")
 
-                        result = DownloadResult(
-                            identifier=identifier,
-                            status="failure",
-                            error_reason=f"Download hung (timeout after {self.timeout * 2}s)",
-                        )
-                        results.append(result)
-                        status_counts['failure'] += 1
+                                # Add to postponed cache
+                                if self.postponed_cache:
+                                    self.postponed_cache.add_paper(
+                                        doi,
+                                        reason=f"Download hung (as_completed timeout after {self.timeout * 3}s)"
+                                    )
 
-                        # Record in database as failed to prevent retry
-                        if self.db:
-                            self.db.record_failure(
-                                identifier,
-                                f"Download hung (timeout after {self.timeout * 2}s)",
-                                should_retry=False  # Don't retry hanging downloads
-                            )
-                    except Exception as e:
-                        logger.error(f"Error processing {identifier}: {e}")
-                        result = DownloadResult(
-                            identifier=identifier, status="failure", error_reason=str(e)
-                        )
-                        results.append(result)
-                        status_counts['failure'] += 1
+                                # Create failure result
+                                result = DownloadResult(
+                                    identifier=doi,
+                                    status="failure",
+                                    error_reason=f"Download hung (as_completed timeout after {self.timeout * 3}s)",
+                                )
+                                results.append(result)
+                                status_counts['failure'] += 1
 
-                    completed_count += 1
-                    if progress_callback:
-                        progress_callback(completed_count, total)
-
-                    # Brief pause to avoid hammering servers
-                    time.sleep(0.1)
+                                # Record in database
+                                if self.db:
+                                    self.db.record_failure(
+                                        doi,
+                                        f"Download hung (as_completed timeout after {self.timeout * 3}s)",
+                                        should_retry=False
+                                    )
+                finally:
+                    # CRITICAL: If we timed out, use wait=False to avoid hanging on executor shutdown
+                    # This allows the process to continue even if many tasks are still running
+                    if timed_out:
+                        logger.warning(f"Executor timeout detected (batch {batch_num}) - shutting down executor without waiting for pending tasks")
+                        executor.shutdown(wait=False)
+                    else:
+                        # Normal shutdown - wait for all tasks to complete
+                        executor.shutdown(wait=True)
+                
+                # Brief pause between batches to avoid overwhelming the system
+                if batch_num < num_batches:
+                    time.sleep(0.5)
 
         # Close progress bar if we created one
         if pbar:
@@ -832,6 +1000,37 @@ class PDFFetcher:
             return {}
 
         return self.db.get_stats()
+
+    def get_retry_stats(self, max_attempts: int = None) -> Dict:
+        """
+        Get statistics on papers that will retry downloading.
+
+        Shows how many papers will be retried within 1 day and 1 week.
+
+        Args:
+            max_attempts: Maximum retry attempts (default: uses fetcher's max_attempts)
+
+        Returns:
+            Dictionary with retry statistics including summary string
+
+        Example:
+            >>> fetcher = PDFFetcher(output_dir="pdfs")
+            >>> stats = fetcher.get_retry_stats()
+            >>> print(stats['summary'])
+            5 papers will retry within 1 day, 12 within 1 week (out of 15 retryable papers)
+        """
+        if self.db is None:
+            return {
+                "error": "No database available",
+                "total_retry": 0,
+                "retry_1_day": 0,
+                "retry_1_week": 0
+            }
+
+        if max_attempts is None:
+            max_attempts = self.max_attempts
+
+        return self.db.get_retry_stats(max_attempts=max_attempts)
 
 
 if __name__ == "__main__":

@@ -642,6 +642,96 @@ class DownloadMetadataDB:
                 "strategy_stats": strategy_stats,
             }
 
+    def get_retry_stats(self, max_attempts: int = 3) -> Dict[str, Any]:
+        """
+        Get statistics on papers that will retry downloading.
+
+        Shows how many papers will be retried within 1 day and 1 week.
+
+        Args:
+            max_attempts: Maximum retry attempts (default: 3)
+
+        Returns:
+            Dictionary with retry statistics:
+            - total_retry: Total papers that will retry
+            - retry_1_day: Papers eligible for retry within 1 day
+            - retry_1_week: Papers eligible for retry within 1 week
+            - never_retry: Papers marked as should_retry=False
+            - max_attempts_reached: Papers that hit max attempts
+        """
+        from datetime import timedelta
+
+        with self._get_connection() as conn:
+            now = datetime.now()
+            one_day_ago = now - timedelta(days=1)
+            one_week_ago = now - timedelta(weeks=1)
+
+            # Total papers that can retry (should_retry=1 and attempt_count < max_attempts)
+            total_retry = conn.execute(
+                """
+                SELECT COUNT(*) as count FROM download_results
+                WHERE status = 'failure'
+                AND should_retry = 1
+                AND attempt_count < ?
+                """,
+                (max_attempts,)
+            ).fetchone()["count"]
+
+            # Papers that will retry within 1 day (failed in last day)
+            retry_1_day = conn.execute(
+                """
+                SELECT COUNT(*) as count FROM download_results
+                WHERE status = 'failure'
+                AND should_retry = 1
+                AND attempt_count < ?
+                AND last_attempted >= ?
+                """,
+                (max_attempts, one_day_ago.isoformat())
+            ).fetchone()["count"]
+
+            # Papers that will retry within 1 week (failed in last week)
+            retry_1_week = conn.execute(
+                """
+                SELECT COUNT(*) as count FROM download_results
+                WHERE status = 'failure'
+                AND should_retry = 1
+                AND attempt_count < ?
+                AND last_attempted >= ?
+                """,
+                (max_attempts, one_week_ago.isoformat())
+            ).fetchone()["count"]
+
+            # Papers marked as never retry
+            never_retry = conn.execute(
+                """
+                SELECT COUNT(*) as count FROM download_results
+                WHERE status = 'failure'
+                AND should_retry = 0
+                """
+            ).fetchone()["count"]
+
+            # Papers that hit max attempts
+            max_attempts_reached = conn.execute(
+                """
+                SELECT COUNT(*) as count FROM download_results
+                WHERE status = 'failure'
+                AND attempt_count >= ?
+                """,
+                (max_attempts,)
+            ).fetchone()["count"]
+
+            return {
+                "total_retry": total_retry,
+                "retry_1_day": retry_1_day,
+                "retry_1_week": retry_1_week,
+                "never_retry": never_retry,
+                "max_attempts_reached": max_attempts_reached,
+                "summary": (
+                    f"{retry_1_day} papers will retry within 1 day, "
+                    f"{retry_1_week} within 1 week (out of {total_retry} retryable papers)"
+                )
+            }
+
     def mark_archived(self, identifier: str, archive_location: str):
         """
         Mark a PDF as archived to remote location.

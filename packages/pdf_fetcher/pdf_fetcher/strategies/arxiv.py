@@ -32,6 +32,8 @@ See: https://info.arxiv.org/help/api/index.html
 from typing import Optional, Set
 import re
 import logging
+import time
+import threading
 
 # Handle both package import and standalone testing
 try:
@@ -60,6 +62,11 @@ class ArxivStrategy(DownloadStrategy):
     - Old format: "math.GT/0309136"
     - DOI that resolves to ArXiv: "10.48550/arXiv.2301.12345"
     - ArXiv URL: "https://arxiv.org/abs/2301.12345"
+
+    Rate Limiting:
+    - Enforces cooldown between requests (default: 1 second)
+    - Respects ArXiv's guidelines for polite API usage
+    - Thread-safe for parallel downloads
     """
 
     # ArXiv ID patterns
@@ -70,9 +77,90 @@ class ArxivStrategy(DownloadStrategy):
     # DOI pattern for ArXiv: 10.48550/arXiv.YYMM.NNNNN
     ARXIV_DOI_PATTERN = re.compile(r'10\.48550/arXiv\.(\d{4}\.\d{4,5})(v\d+)?')
 
-    def __init__(self):
-        """Initialize ArXiv strategy."""
+    # Class-level rate limiting (shared across all instances)
+    _last_request_time = 0
+    _rate_limit_lock = threading.Lock()
+    _cooldown = 1.0  # Default 1 second cooldown
+
+    # Class-level rate limit pause flag
+    # When True, ALL arXiv downloads should be skipped to avoid hammering servers
+    _rate_limited = False
+    _rate_limit_detected_time = 0
+
+    def __init__(self, cooldown: float = 1.0):
+        """
+        Initialize ArXiv strategy.
+
+        Args:
+            cooldown: Minimum seconds between requests (default: 1.0)
+                     Set to 0 to disable rate limiting (not recommended)
+        """
         super().__init__(name="ArXiv")
+        # Update class-level cooldown if specified
+        if cooldown != 1.0:
+            ArxivStrategy._cooldown = cooldown
+
+    @classmethod
+    def enforce_rate_limit(cls):
+        """
+        Enforce rate limiting by sleeping if needed.
+
+        Thread-safe: Uses lock to ensure only one thread accesses rate limiter.
+        """
+        if cls._cooldown <= 0:
+            return  # Rate limiting disabled
+
+        with cls._rate_limit_lock:
+            now = time.time()
+            time_since_last = now - cls._last_request_time
+
+            if time_since_last < cls._cooldown:
+                sleep_time = cls._cooldown - time_since_last
+                logger.debug(f"ArXiv rate limit: sleeping {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+
+            cls._last_request_time = time.time()
+
+    @classmethod
+    def is_rate_limited(cls) -> bool:
+        """
+        Check if ArXiv is currently rate limited.
+
+        Returns:
+            True if ArXiv downloads should be paused
+        """
+        return cls._rate_limited
+
+    @classmethod
+    def set_rate_limited(cls, reason: str = "Rate limit detected"):
+        """
+        Mark ArXiv as rate limited - pauses ALL ArXiv downloads.
+
+        This is called when we detect captcha, "too many requests", or other
+        rate limiting indicators. Once set, all ArXiv downloads will be skipped
+        until manually reset.
+
+        Args:
+            reason: Reason for rate limiting (for logging)
+        """
+        cls._rate_limited = True
+        cls._rate_limit_detected_time = time.time()
+        logger.warning(f"🚫 ArXiv rate limit activated: {reason}")
+        logger.warning(f"   All ArXiv downloads will be skipped until reset")
+
+    @classmethod
+    def reset_rate_limit(cls):
+        """
+        Reset ArXiv rate limit flag - allows downloads to resume.
+
+        Call this manually after waiting for rate limit to expire,
+        or automatically after a cooldown period.
+        """
+        if cls._rate_limited:
+            duration = time.time() - cls._rate_limit_detected_time
+            logger.info(f"✓ ArXiv rate limit reset (was paused for {duration:.0f}s)")
+            cls._rate_limited = False
+            cls._rate_limit_detected_time = 0
 
     def can_handle(self, identifier: str, url: Optional[str] = None) -> bool:
         """
@@ -92,6 +180,7 @@ class ArxivStrategy(DownloadStrategy):
         Returns:
             True if this is an ArXiv paper
         """
+        
         # Check for explicit arxiv prefix
         if identifier.lower().startswith('arxiv:'):
             return True
@@ -197,6 +286,9 @@ class ArxivStrategy(DownloadStrategy):
         Returns:
             Direct PDF URL or None if ID extraction fails
         """
+        # Enforce rate limiting (be polite to ArXiv!)
+        self.enforce_rate_limit()
+
         # Extract clean ArXiv ID
         arxiv_id = self.extract_arxiv_id(identifier)
 
@@ -205,7 +297,7 @@ class ArxivStrategy(DownloadStrategy):
             return None
 
         # Construct PDF URL
-        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        pdf_url = f"https://export.arxiv.org/pdf/{arxiv_id}.pdf" # Use export.arxiv.org as preferred by arXiv
 
         logger.debug(f"ArXiv PDF URL: {pdf_url}")
         return pdf_url
@@ -215,8 +307,12 @@ class ArxivStrategy(DownloadStrategy):
         Determine if error should postpone vs. fail.
 
         ArXiv is very reliable, so most errors are permanent:
-        - 404 = paper doesn't exist
+        - 404 = paper doesn't exist (fail)
+        - HTML/captcha response = rate limiting/bot detection (postpone)
         - Network errors = temporary (postpone)
+
+        When rate limiting is detected, this method also sets a class-level
+        flag that pauses ALL ArXiv downloads across the entire batch.
 
         Args:
             error_msg: Error message
@@ -230,6 +326,31 @@ class ArxivStrategy(DownloadStrategy):
         # Postpone on network/server errors
         if any(x in error_lower for x in ['timeout', 'connection', 'network', '503', '502', '500']):
             return True
+
+        # Postpone if we got HTML instead of PDF (captcha/rate limiting)
+        if 'not a pdf' in error_lower or 'html' in error_lower:
+            logger.warning(f"ArXiv returned HTML instead of PDF - possible captcha/rate limiting")
+            # Activate batch-level pause
+            self.set_rate_limited("HTML instead of PDF (captcha/rate limiting)")
+            return True
+
+        # Check HTML content for captcha indicators
+        if html:
+            html_lower = html.lower()
+            captcha_indicators = [
+                'captcha',
+                'recaptcha',
+                'verify you are human',
+                'security check',
+                'unusual traffic',
+                'automated requests',
+                'too many requests'
+            ]
+            if any(indicator in html_lower for indicator in captcha_indicators):
+                logger.warning(f"ArXiv captcha/rate limit detected - postponing")
+                # Activate batch-level pause
+                self.set_rate_limited(f"Captcha/rate limit detected in response")
+                return True
 
         # Fail permanently on 404
         if '404' in error_lower or 'not found' in error_lower:

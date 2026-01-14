@@ -12,9 +12,17 @@ timeout: 30             # Download timeout in seconds (per request)
 
 # Unpaywall API Settings
 unpaywall:
-  email: "research@example.org"  # REQUIRED: Set your real email for Unpaywall API
+  # email: "research@example.org"  # REQUIRED: Set your real email for Unpaywall API
+  email: "fvb832@ku.dk"
   # Get API access at: https://unpaywall.org/products/api
   # Rate limit: 100,000 requests/day (free for research)
+
+# ArXiv Settings
+arxiv:
+  # cooldown: 1.0  # Minimum seconds between requests (default: 1.0, set to 0 to disable)
+  # cooldown: 3.0
+  cooldown: 0.5
+  # ArXiv asks for polite rate limiting - this enforces a delay between downloads
 
 # HTTP Headers (to avoid bot detection)
 user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
