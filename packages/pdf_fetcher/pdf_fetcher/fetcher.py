@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import List, Dict, Optional, Callable, Tuple, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+import signal
+import threading
 import requests
 import yaml
 from dataclasses import dataclass
@@ -106,6 +108,54 @@ class PDFFetcher:
         "10.1134": "Pleiades Publishing",
         "10.3842": "Institute of Mathematics of NAS of Ukraine",
     }
+
+    # Class-level interrupt handling
+    _interrupted = False
+    _current_executor: Optional[ThreadPoolExecutor] = None
+    _original_sigint_handler = None
+    _original_sigterm_handler = None
+
+    @classmethod
+    def _signal_handler(cls, signum, frame):
+        """Handle Ctrl+C and SIGTERM gracefully."""
+        signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+        logger.warning(f"\n⚠ {signal_name} received - shutting down gracefully...")
+        logger.warning("  (Press Ctrl+C again to force quit)")
+
+        cls._interrupted = True
+
+        # Shutdown executor immediately without waiting
+        if cls._current_executor is not None:
+            logger.warning("  Cancelling pending downloads...")
+            cls._current_executor.shutdown(wait=False, cancel_futures=True)
+
+        # Restore original handler so second Ctrl+C forces quit
+        if cls._original_sigint_handler is not None:
+            signal.signal(signal.SIGINT, cls._original_sigint_handler)
+
+    @classmethod
+    def _install_signal_handlers(cls):
+        """Install signal handlers for graceful shutdown."""
+        # Only install from main thread
+        if threading.current_thread() is not threading.main_thread():
+            return
+
+        cls._interrupted = False
+        cls._original_sigint_handler = signal.signal(signal.SIGINT, cls._signal_handler)
+        cls._original_sigterm_handler = signal.signal(signal.SIGTERM, cls._signal_handler)
+
+    @classmethod
+    def _restore_signal_handlers(cls):
+        """Restore original signal handlers."""
+        if threading.current_thread() is not threading.main_thread():
+            return
+
+        if cls._original_sigint_handler is not None:
+            signal.signal(signal.SIGINT, cls._original_sigint_handler)
+            cls._original_sigint_handler = None
+        if cls._original_sigterm_handler is not None:
+            signal.signal(signal.SIGTERM, cls._original_sigterm_handler)
+            cls._original_sigterm_handler = None
 
     @staticmethod
     def load_config(config_path: Optional[Union[str, Path]] = None) -> Dict:
@@ -682,6 +732,9 @@ class PDFFetcher:
         """
         from tqdm import tqdm
 
+        # Install signal handlers for graceful Ctrl+C handling
+        self._install_signal_handlers()
+
         results = []
         total = len(identifiers)
 
@@ -800,9 +853,14 @@ class PDFFetcher:
                 logger.info(f"Processing {len(to_download)} identifiers in {num_batches} batches of up to {batch_size} each")
             
             for batch_num, batch_start in enumerate(range(0, len(to_download), batch_size), 1):
+                # Check if interrupted by Ctrl+C
+                if self._interrupted:
+                    logger.warning(f"⚠ Interrupted - stopping after {batch_num - 1} batches")
+                    break
+
                 batch_end = min(batch_start + batch_size, len(to_download))
                 batch_identifiers = to_download[batch_start:batch_end]
-                
+
                 if num_batches > 1:
                     logger.info(f"Processing batch {batch_num}/{num_batches} ({len(batch_identifiers)} identifiers)")
                 
@@ -839,6 +897,7 @@ class PDFFetcher:
 
                 # Use manual executor management (not context manager) to allow shutdown(wait=False) on timeout
                 executor = ThreadPoolExecutor(max_workers=self.max_workers)
+                PDFFetcher._current_executor = executor  # Store for signal handler
                 timed_out = False
                 try:
                     # Submit only identifiers that need downloading (and aren't rate-limited ArXiv)
@@ -916,6 +975,11 @@ class PDFFetcher:
                             if progress_callback:
                                 progress_callback(completed_count, total)
 
+                            # Check for interrupt
+                            if self._interrupted:
+                                logger.warning("⚠ Interrupted during batch - stopping")
+                                break
+
                             # Brief pause to avoid hammering servers
                             time.sleep(0.1)
 
@@ -956,14 +1020,14 @@ class PDFFetcher:
                                         should_retry=False
                                     )
                 finally:
-                    # CRITICAL: If we timed out, use wait=False to avoid hanging on executor shutdown
-                    # This allows the process to continue even if many tasks are still running
-                    if timed_out:
-                        logger.warning(f"Executor timeout detected (batch {batch_num}) - shutting down executor without waiting for pending tasks")
-                        executor.shutdown(wait=False)
+                    # CRITICAL: If we timed out or were interrupted, use wait=False to avoid hanging
+                    if timed_out or self._interrupted:
+                        logger.warning(f"Executor shutdown (batch {batch_num}) - not waiting for pending tasks")
+                        executor.shutdown(wait=False, cancel_futures=True)
                     else:
                         # Normal shutdown - wait for all tasks to complete
                         executor.shutdown(wait=True)
+                    PDFFetcher._current_executor = None  # Clear executor reference
                 
                 # Brief pause between batches to avoid overwhelming the system
                 if batch_num < num_batches:
@@ -991,6 +1055,13 @@ class PDFFetcher:
                     f"+{analysis['prefixes_added']} DOI prefixes "
                     f"(total: {analysis['total_domains']} domains, {analysis['total_prefixes']} prefixes)"
                 )
+
+        # Restore original signal handlers
+        self._restore_signal_handlers()
+
+        # Log if we were interrupted
+        if self._interrupted:
+            logger.warning(f"⚠ Fetch interrupted - returning {len(results)} partial results")
 
         return results
 
