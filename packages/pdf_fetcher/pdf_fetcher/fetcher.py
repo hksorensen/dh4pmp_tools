@@ -985,34 +985,31 @@ class PDFFetcher:
                         if self._interrupted:
                             logger.warning(f"⚠ Interrupted - {len(pending_futures)} downloads still pending")
                         elif timed_out:
-                            logger.error(f"   {len(future_to_id)} tasks submitted, {len(future_to_id) - len(pending_futures)} completed")
+                            logger.warning(f"⏸ Timeout - {len(pending_futures)} downloads will be postponed for retry")
+                            logger.info(f"   {len(future_to_id)} tasks submitted, {len(future_to_id) - len(pending_futures)} completed")
 
                         for future in pending_futures:
                             doi = future_to_id[future]
-                            reason = "Interrupted by user" if self._interrupted else f"Download hung (batch timeout after {batch_timeout}s)"
+                            reason = "Interrupted by user" if self._interrupted else f"Download timeout (will retry)"
 
                             if not self._interrupted:
-                                logger.error(f"   🚫 Still running: {doi}")
+                                logger.debug(f"   ⏸ Postponed: {doi}")
 
-                            # Add to postponed cache (only for timeouts, not interrupts)
-                            if self.postponed_cache and not self._interrupted:
-                                self.postponed_cache.add_paper(doi, reason=reason)
+                            # Don't add to postponed_cache for timeouts - they're likely temporary
+                            # The postponed_cache is for known-bad domains/papers, not transient issues
 
-                            # Create failure result
+                            # Create postponed result (will retry on next run)
                             result = DownloadResult(
                                 identifier=doi,
-                                status="failure" if not self._interrupted else "postponed",
+                                status="postponed",
                                 error_reason=reason,
                             )
                             results.append(result)
-                            if self._interrupted:
-                                status_counts['postponed'] += 1
-                            else:
-                                status_counts['failure'] += 1
+                            status_counts['postponed'] += 1
 
-                            # Record in database (only for timeouts)
+                            # Record in database with should_retry=True (timeouts are often temporary)
                             if self.db and not self._interrupted:
-                                self.db.record_failure(doi, reason, should_retry=False)
+                                self.db.record_failure(doi, reason, should_retry=True)
 
                             completed_count += 1
                             if progress_callback:
