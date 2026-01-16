@@ -32,3 +32,4 @@ Thumbs.db
 .cache/
 *.log
 **/*.backup_*/
+packages/photo_mosaic/
