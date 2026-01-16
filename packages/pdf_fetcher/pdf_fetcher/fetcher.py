@@ -111,6 +111,7 @@ class PDFFetcher:
 
     # Class-level interrupt handling
     _interrupted = False
+    _interrupt_count = 0
     _current_executor: Optional[ThreadPoolExecutor] = None
     _original_sigint_handler = None
     _original_sigterm_handler = None
@@ -118,20 +119,24 @@ class PDFFetcher:
     @classmethod
     def _signal_handler(cls, signum, frame):
         """Handle Ctrl+C and SIGTERM gracefully."""
-        signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
-        logger.warning(f"\n⚠ {signal_name} received - shutting down gracefully...")
-        logger.warning("  (Press Ctrl+C again to force quit)")
+        import os
 
+        cls._interrupt_count += 1
         cls._interrupted = True
 
-        # Shutdown executor immediately without waiting
-        if cls._current_executor is not None:
-            logger.warning("  Cancelling pending downloads...")
-            cls._current_executor.shutdown(wait=False, cancel_futures=True)
+        if cls._interrupt_count == 1:
+            signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+            logger.warning(f"\n⚠ {signal_name} received - shutting down gracefully...")
+            logger.warning("  (Press Ctrl+C again to force quit)")
 
-        # Restore original handler so second Ctrl+C forces quit
-        if cls._original_sigint_handler is not None:
-            signal.signal(signal.SIGINT, cls._original_sigint_handler)
+            # Shutdown executor immediately without waiting
+            if cls._current_executor is not None:
+                logger.warning("  Cancelling pending downloads...")
+                cls._current_executor.shutdown(wait=False, cancel_futures=True)
+        else:
+            # Second interrupt - force quit immediately
+            logger.warning(f"\n⚠ Force quit (interrupt #{cls._interrupt_count})")
+            os._exit(1)
 
     @classmethod
     def _install_signal_handlers(cls):
@@ -141,6 +146,7 @@ class PDFFetcher:
             return
 
         cls._interrupted = False
+        cls._interrupt_count = 0
         cls._original_sigint_handler = signal.signal(signal.SIGINT, cls._signal_handler)
         cls._original_sigterm_handler = signal.signal(signal.SIGTERM, cls._signal_handler)
 
