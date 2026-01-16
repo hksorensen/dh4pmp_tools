@@ -16,9 +16,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import signal
 import threading
+import socket
 import requests
 import yaml
 from dataclasses import dataclass
+
+# Set global socket timeout to prevent indefinite blocking in C code
+# This is a fallback for when requests timeouts don't work (e.g., stuck in SSL handshake)
+socket.setdefaulttimeout(60)
 
 from .utils import sanitize_doi_to_filename
 
