@@ -907,16 +907,37 @@ class PDFFetcher:
                     }
                     logger.debug(f"Submitted {len(future_to_id)} download tasks for batch {batch_num}")
 
-                    # Collect results as they complete
-                    # IMPORTANT: as_completed() can block forever if a future never completes
-                    # Add timeout to force it to stop waiting (though thread will keep running)
-                    try:
-                        for future in as_completed(future_to_id, timeout=self.timeout * 3):
+                    # Collect results using polling instead of blocking as_completed()
+                    # This allows us to respond to Ctrl+C immediately
+                    batch_timeout = self.timeout * 3
+                    batch_start_time = time.time()
+                    pending_futures = set(future_to_id.keys())
+
+                    while pending_futures and not self._interrupted:
+                        # Check batch timeout
+                        elapsed = time.time() - batch_start_time
+                        if elapsed > batch_timeout:
+                            timed_out = True
+                            logger.error(f"⏱ Batch TIMEOUT after {batch_timeout}s (batch {batch_num})")
+                            break
+
+                        # Poll for completed futures (non-blocking check)
+                        newly_done = {f for f in pending_futures if f.done()}
+
+                        if not newly_done:
+                            # No futures completed yet - short sleep and check again
+                            time.sleep(0.1)
+                            continue
+
+                        # Process completed futures
+                        for future in newly_done:
+                            pending_futures.remove(future)
                             identifier = future_to_id[future]
+
                             try:
-                                # Aggressive timeout to prevent infinite hang
-                                # Use shorter timeout (2x instead of 3x) to catch hangs faster
-                                result = future.result(timeout=self.timeout * 2)
+                                # Future is done, so result() should return immediately
+                                # But add a small timeout just in case
+                                result = future.result(timeout=1.0)
                                 results.append(result)
 
                                 # Track status for progress bar
@@ -934,35 +955,16 @@ class PDFFetcher:
                                     status_counts['skipped'] += 1
 
                             except TimeoutError:
-                                # Thread is still running but we've given up waiting
-                                logger.error(f"⏱ TIMEOUT: {identifier} hung for {self.timeout * 2}s (thread may still be running)")
-                                logger.error(f"   This paper will be marked as failed and postponed")
-
-                                # Automatically postpone papers that timeout
-                                if self.postponed_cache:
-                                    self.postponed_cache.add_paper(
-                                        identifier,
-                                        reason=f"Download hung (timeout after {self.timeout * 2}s)"
-                                    )
-                                    logger.warning(f"   🚫 Paper added to postponed cache: {identifier}")
-                                else:
-                                    logger.error(f"   Consider postponing paper: {identifier}")
-
+                                # Shouldn't happen since future.done() was True
+                                logger.error(f"⏱ TIMEOUT getting result for {identifier}")
                                 result = DownloadResult(
                                     identifier=identifier,
                                     status="failure",
-                                    error_reason=f"Download hung (timeout after {self.timeout * 2}s)",
+                                    error_reason="Timeout getting result",
                                 )
                                 results.append(result)
                                 status_counts['failure'] += 1
 
-                                # Record in database as failed to prevent retry
-                                if self.db:
-                                    self.db.record_failure(
-                                        identifier,
-                                        f"Download hung (timeout after {self.timeout * 2}s)",
-                                        should_retry=False  # Don't retry hanging downloads
-                                    )
                             except Exception as e:
                                 logger.error(f"Error processing {identifier}: {e}")
                                 result = DownloadResult(
@@ -975,58 +977,52 @@ class PDFFetcher:
                             if progress_callback:
                                 progress_callback(completed_count, total)
 
-                            # Check for interrupt
-                            if self._interrupted:
-                                logger.warning("⚠ Interrupted during batch - stopping")
-                                break
+                        # Brief pause to avoid busy-waiting
+                        time.sleep(0.05)
 
-                            # Brief pause to avoid hammering servers
-                            time.sleep(0.1)
+                    # Handle remaining pending futures (timeout or interrupted)
+                    if pending_futures:
+                        if self._interrupted:
+                            logger.warning(f"⚠ Interrupted - {len(pending_futures)} downloads still pending")
+                        elif timed_out:
+                            logger.error(f"   {len(future_to_id)} tasks submitted, {len(future_to_id) - len(pending_futures)} completed")
 
-                    except TimeoutError:
-                        # as_completed() timed out - some futures never completed
-                        timed_out = True
-                        logger.error(f"⏱ as_completed() TIMEOUT after {self.timeout * 3}s (batch {batch_num})")
-                        logger.error(f"   {len(future_to_id)} tasks were submitted, {len([f for f in future_to_id.keys() if f.done()])} completed")
+                        for future in pending_futures:
+                            doi = future_to_id[future]
+                            reason = "Interrupted by user" if self._interrupted else f"Download hung (batch timeout after {batch_timeout}s)"
 
-                        # Find which DOIs didn't complete
-                        pending_dois = []
-                        for future, doi in future_to_id.items():
-                            if not future.done():
-                                pending_dois.append(doi)
+                            if not self._interrupted:
                                 logger.error(f"   🚫 Still running: {doi}")
 
-                                # Add to postponed cache
-                                if self.postponed_cache:
-                                    self.postponed_cache.add_paper(
-                                        doi,
-                                        reason=f"Download hung (as_completed timeout after {self.timeout * 3}s)"
-                                    )
+                            # Add to postponed cache (only for timeouts, not interrupts)
+                            if self.postponed_cache and not self._interrupted:
+                                self.postponed_cache.add_paper(doi, reason=reason)
 
-                                # Create failure result
-                                result = DownloadResult(
-                                    identifier=doi,
-                                    status="failure",
-                                    error_reason=f"Download hung (as_completed timeout after {self.timeout * 3}s)",
-                                )
-                                results.append(result)
+                            # Create failure result
+                            result = DownloadResult(
+                                identifier=doi,
+                                status="failure" if not self._interrupted else "postponed",
+                                error_reason=reason,
+                            )
+                            results.append(result)
+                            if self._interrupted:
+                                status_counts['postponed'] += 1
+                            else:
                                 status_counts['failure'] += 1
 
-                                # Record in database
-                                if self.db:
-                                    self.db.record_failure(
-                                        doi,
-                                        f"Download hung (as_completed timeout after {self.timeout * 3}s)",
-                                        should_retry=False
-                                    )
+                            # Record in database (only for timeouts)
+                            if self.db and not self._interrupted:
+                                self.db.record_failure(doi, reason, should_retry=False)
+
+                            completed_count += 1
+                            if progress_callback:
+                                progress_callback(completed_count, total)
+
                 finally:
-                    # CRITICAL: If we timed out or were interrupted, use wait=False to avoid hanging
-                    if timed_out or self._interrupted:
-                        logger.warning(f"Executor shutdown (batch {batch_num}) - not waiting for pending tasks")
-                        executor.shutdown(wait=False, cancel_futures=True)
-                    else:
-                        # Normal shutdown - wait for all tasks to complete
-                        executor.shutdown(wait=True)
+                    # ALWAYS use wait=False to avoid hanging on shutdown
+                    # The threads may keep running but at least we can exit
+                    logger.debug(f"Executor shutdown (batch {batch_num})")
+                    executor.shutdown(wait=False, cancel_futures=True)
                     PDFFetcher._current_executor = None  # Clear executor reference
                 
                 # Brief pause between batches to avoid overwhelming the system
