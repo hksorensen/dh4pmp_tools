@@ -538,10 +538,16 @@ class PDFFetcher:
         session = requests.Session()
         session.headers.update(headers)
 
+        # Use tuple timeout: (connect_timeout, read_timeout)
+        # Read timeout is per-chunk, so keep it shorter to detect stalls faster
+        connect_timeout = min(self.timeout, 30)  # Max 30s to connect
+        read_timeout = min(self.timeout, 30)  # Max 30s between chunks
+        request_timeout = (connect_timeout, read_timeout)
+
         # Fetch landing page once (reuse for all strategies)
         html_content = None
         try:
-            response = session.get(landing_url, timeout=self.timeout, allow_redirects=True)
+            response = session.get(landing_url, timeout=request_timeout, allow_redirects=True)
             html_content = response.text if response.status_code == 200 else None
         except Exception as e:
             logger.warning(f"Failed to fetch landing page for {identifier}: {e}")
@@ -572,7 +578,7 @@ class PDFFetcher:
                 pdf_response = session.get(
                     pdf_url,
                     headers=custom_headers,  # Add strategy headers (API keys, etc.)
-                    timeout=self.timeout,
+                    timeout=request_timeout,  # Tuple: (connect, read) for faster stall detection
                     allow_redirects=True,
                     stream=True,  # Stream for large PDFs
                 )
@@ -595,14 +601,26 @@ class PDFFetcher:
 
                 # Download PDF content properly with streaming
                 # IMPORTANT: Must iterate over chunks when stream=True to get complete file
-                # Add timeout protection for slow chunk reads
+                # Add timeout protection for slow chunk reads AND total download time
                 pdf_content = bytearray()
                 chunk_start_time = time.time()
+                download_start_time = time.time()
                 download_stalled = False
+                max_total_time = self.timeout * 2  # Total download timeout (e.g., 60s)
 
                 for chunk in pdf_response.iter_content(chunk_size=8192):
+                    now = time.time()
+
+                    # Check total download time (prevents slow-drip attacks)
+                    if now - download_start_time > max_total_time:
+                        error = f"Download too slow (exceeded {max_total_time}s total)"
+                        logger.warning(f"{strategy.__class__.__name__}: {error}")
+                        last_error = error
+                        download_stalled = True
+                        break
+
                     # Check if we've been downloading too long (per-chunk timeout)
-                    if time.time() - chunk_start_time > self.timeout:
+                    if now - chunk_start_time > self.timeout:
                         error = f"Download stalled (no progress for {self.timeout}s)"
                         logger.warning(f"{strategy.__class__.__name__}: {error}")
                         last_error = error
@@ -615,6 +633,7 @@ class PDFFetcher:
 
                 # Skip this strategy if download stalled
                 if download_stalled:
+                    pdf_response.close()  # Close connection to free resources
                     continue  # Try next strategy
 
                 pdf_content = bytes(pdf_content)

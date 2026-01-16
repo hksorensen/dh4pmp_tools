@@ -10,7 +10,7 @@ Handles Crossref-specific:
 """
 
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 from dataclasses import dataclass
 from urllib.parse import quote_plus, urlencode
 import logging
@@ -18,7 +18,7 @@ import pandas as pd
 import yaml
 
 from .base_client import BaseAPIClient, APIConfig, RateLimiter, BaseSearchFetcher
-from caching import SQLiteLocalCache
+from db_utils import SQLiteTableStorage
 
 logger = logging.getLogger(__name__)
 
@@ -450,7 +450,7 @@ class CrossrefBibliographicFetcher:
     def __init__(
         self,
         mailto: Optional[str] = None,
-        cache_dir: str = "~/.cache/crossref/bibliographic",
+        db_path: Optional[Union[str, Path]] = None,
         api_key_dir: str = "~/Documents/dh4pmp/api_keys",
         **kwargs
     ):
@@ -459,7 +459,7 @@ class CrossrefBibliographicFetcher:
         
         Args:
             mailto: Email address for polite pool access (if None, tries to load from yaml)
-            cache_dir: Directory for cache files
+            db_path: Path to SQLite database file (default: None = use default research database)
             api_key_dir: Directory containing API config files
             **kwargs: Additional configuration:
                 - requests_per_second: Rate limit (default: 10.0 for polite, 1.0 for public)
@@ -484,15 +484,229 @@ class CrossrefBibliographicFetcher:
             max_retries=kwargs.get('max_retries', 3),
         )
         
-        # Initialize client and cache (using SQLite for faster metadata access)
+        # Initialize client
         self.client = CrossrefBibliographicClient(config)
-        self.cache = SQLiteLocalCache(
-            cache_dir=cache_dir,
-            compression=True,
-            max_age_days=kwargs.get('cache_max_age_days', None)
+        
+        # Initialize cache using SQLiteTableStorage (universal database)
+        # Default to research database if not specified
+        if db_path is None:
+            # Try to use default research database path
+            default_db = Path.home() / "Documents" / "dh4pmp" / "research" / "diagrams_in_arxiv" / "data" / "research_corpus.db"
+            if default_db.exists():
+                db_path = str(default_db)
+            else:
+                # Fallback to cache directory location
+                cache_dir = Path("~/.cache/crossref/bibliographic").expanduser()
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                db_path = str(cache_dir / "crossref_cache.db")
+        else:
+            # Convert Path to string if needed
+            db_path = str(db_path) if isinstance(db_path, Path) else db_path
+        
+        self.cache_max_age_days = kwargs.get('cache_max_age_days', None)
+        self._cache_storage = SQLiteTableStorage(
+            db_path=db_path,
+            table_name="crossref_cache",
+            column_ID="cache_key",
+            ID_type=str,
+            json_columns=["metadata"],
+            gzip_columns=["metadata"],
+            table_layout={
+                "cache_key": "TEXT PRIMARY KEY",
+                "metadata": "BLOB",
+                "error": "TEXT",
+                "timestamp": "TEXT",
+                "num_hits": "INTEGER",
+                "status": "TEXT",
+            }
         )
         
-        logger.info(f"Initialized Crossref bibliographic fetcher with cache at {self.cache.cache_dir}")
+        logger.info(f"Initialized Crossref bibliographic fetcher with cache at {db_path}")
+        
+        # Create a cache wrapper object that provides the same interface as SQLiteLocalCache
+        # This allows existing code to access cache.get_stats() etc.
+        class CacheWrapper:
+            def __init__(self, fetcher):
+                self._fetcher = fetcher
+            
+            def get_stats(self):
+                return self._fetcher._cache_get_stats()
+            
+            def get_many(self, keys):
+                return self._fetcher._cache_get_many(keys)
+        
+        # Expose cache wrapper for backward compatibility
+        self._cache_wrapper = CacheWrapper(self)
+    
+    @property
+    def cache(self):
+        """Cache wrapper for backward compatibility."""
+        return self._cache_wrapper
+    
+    def _cache_get(self, cache_key: str) -> Optional[pd.DataFrame]:
+        """
+        Get cached data by key.
+        
+        Args:
+            cache_key: Cache key (query string or "doi:...")
+            
+        Returns:
+            DataFrame if found, None otherwise
+        """
+        from datetime import datetime, timedelta
+        
+        if not self._cache_storage.exists():
+            return None
+        
+        # Check expiration if max_age_days is set
+        where_clause = f"cache_key = '{cache_key}'"
+        if self.cache_max_age_days is not None:
+            cutoff = (datetime.now() - timedelta(days=self.cache_max_age_days)).isoformat()
+            where_clause += f" AND timestamp >= '{cutoff}'"
+        
+        df = self._cache_storage.get(where_clause=where_clause)
+        if df is None or len(df) == 0:
+            return None
+        
+        # Extract metadata (gzipped JSON DataFrame)
+        row = df.iloc[0]
+        metadata = row.get('metadata')
+        if metadata is None:
+            return None
+        
+        # Metadata is already decoded by SQLiteTableStorage (gzip + JSON)
+        # It should be a dict representation of the DataFrame
+        if isinstance(metadata, dict):
+            # Reconstruct DataFrame from dict
+            return pd.DataFrame([metadata])
+        elif isinstance(metadata, list):
+            return pd.DataFrame(metadata)
+        else:
+            return metadata
+    
+    def _cache_get_many(self, cache_keys: List[str]) -> Dict[str, Optional[pd.DataFrame]]:
+        """
+        Get cached data for multiple keys in batch.
+        
+        Args:
+            cache_keys: List of cache keys
+            
+        Returns:
+            Dictionary mapping cache key to DataFrame (or None if not cached)
+        """
+        from datetime import datetime, timedelta
+        
+        if not cache_keys:
+            return {}
+        
+        if not self._cache_storage.exists():
+            return {key: None for key in cache_keys}
+        
+        # Build WHERE clause for batch lookup
+        keys_sql = ", ".join(f"'{k}'" for k in cache_keys)
+        where_clause = f"cache_key IN ({keys_sql})"
+        
+        # Check expiration if max_age_days is set
+        if self.cache_max_age_days is not None:
+            cutoff = (datetime.now() - timedelta(days=self.cache_max_age_days)).isoformat()
+            where_clause += f" AND timestamp >= '{cutoff}'"
+        
+        df = self._cache_storage.get(where_clause=where_clause)
+        if df is None or len(df) == 0:
+            return {key: None for key in cache_keys}
+        
+        # Build result dictionary
+        results: Dict[str, Optional[pd.DataFrame]] = {key: None for key in cache_keys}
+        for _, row in df.iterrows():
+            cache_key = str(row['cache_key'])  # Ensure it's a string
+            metadata = row.get('metadata')
+            
+            if metadata is not None:
+                if isinstance(metadata, dict):
+                    results[cache_key] = pd.DataFrame([metadata])
+                elif isinstance(metadata, list):
+                    results[cache_key] = pd.DataFrame(metadata)
+                else:
+                    results[cache_key] = metadata
+        
+        return results
+    
+    def _cache_store(self, cache_key: str, data: pd.DataFrame, **meta_kwargs):
+        """
+        Store data in cache.
+        
+        Args:
+            cache_key: Cache key (query string or "doi:...")
+            data: DataFrame to cache
+            **meta_kwargs: Additional metadata (total_results, num_pages, status, error_msg)
+        """
+        from datetime import datetime
+        
+        # Prepare cache record
+        # Convert DataFrame to dict for storage
+        if len(data) > 0:
+            # Store the first row's data as the metadata
+            row_dict = data.iloc[0].to_dict()
+            # Convert data column (which might be a list) to JSON-serializable format
+            if 'data' in row_dict and isinstance(row_dict['data'], list):
+                # Keep as list - will be JSON serialized
+                pass
+        else:
+            row_dict = {}
+        
+        # Get error from meta_kwargs or from row_dict
+        error_val = meta_kwargs.get('error_msg')
+        if error_val is None and 'error' in row_dict:
+            error_val = row_dict['error']
+        
+        # Build cache record DataFrame
+        # Note: metadata will be JSON encoded and gzipped by SQLiteTableStorage
+        cache_record = pd.DataFrame([{
+            'cache_key': cache_key,
+            'metadata': row_dict,  # Will be JSON encoded and gzipped automatically
+            'error': error_val,
+            'timestamp': datetime.now().isoformat(),
+            'num_hits': meta_kwargs.get('total_results', row_dict.get('num_hits', 0)),
+            'status': meta_kwargs.get('status', None),
+        }])
+        
+        # Store using SQLiteTableStorage (will handle JSON encoding and gzip)
+        # Use store() which avoids duplicates (INSERT OR IGNORE)
+        # For updates, we need to delete first then store, or use a custom upsert
+        # For now, delete existing then store (simple approach)
+        if self._cache_storage.exists():
+            existing = self._cache_storage.get(IDs=[cache_key])
+            if existing is not None and len(existing) > 0:
+                self._cache_storage.delete([cache_key])
+        
+        self._cache_storage.store(cache_record, timestamp=False)  # We set timestamp manually
+    
+    def _cache_get_stats(self) -> Dict[str, Any]:
+        """
+        Get cache statistics.
+        
+        Returns:
+            Dictionary with cache statistics
+        """
+        if not self._cache_storage.exists():
+            return {
+                'num_entries': 0,
+                'total_size_mb': 0.0,
+                'cache_dir': str(self._cache_storage._db._filename),
+            }
+        
+        num_entries = self._cache_storage.size()
+        
+        # Calculate database file size
+        from pathlib import Path
+        db_path = Path(self._cache_storage._db._filename)
+        total_size = db_path.stat().st_size if db_path.exists() else 0
+        
+        return {
+            'num_entries': num_entries,
+            'total_size_mb': total_size / (1024 * 1024),
+            'cache_dir': str(db_path),
+        }
     
     def _load_email(self, api_key_dir: str) -> Optional[str]:
         """Load email from YAML config file (same as CrossrefSearchFetcher)."""
@@ -584,7 +798,7 @@ class CrossrefBibliographicFetcher:
         """
         # Check cache first
         if not force_refresh:
-            cached = self.cache.get(citation)
+            cached = self._cache_get(citation)
             if cached is not None:
                 logger.debug(f"Cache hit for citation: {citation[:50]}...")
                 # Cache stores DataFrames in the expected format
@@ -621,7 +835,7 @@ class CrossrefBibliographicFetcher:
             }])
         
         # Store in cache
-        self.cache.store(citation, df, total_results=df.iloc[0]['num_hits'], num_pages=1)
+        self._cache_store(citation, df, total_results=df.iloc[0]['num_hits'], num_pages=1)
         
         return df
     
@@ -999,7 +1213,7 @@ class CrossrefBibliographicFetcher:
         # Check cache first
         cache_key = f"doi:{doi}"
         if not force_refresh:
-            cached = self.cache.get(cache_key)
+            cached = self._cache_get(cache_key)
             if cached is not None:
                 logger.debug(f"Cache hit for DOI: {doi}")
                 # Check if this is a cached negative result
@@ -1044,7 +1258,7 @@ class CrossrefBibliographicFetcher:
                         'data': [metadata],
                         'error': None
                     }])
-                    self.cache.store(cache_key, cache_df, total_results=1, num_pages=1)
+                    self._cache_store(cache_key, cache_df, total_results=1, num_pages=1)
 
                     return metadata
             else:
@@ -1058,7 +1272,7 @@ class CrossrefBibliographicFetcher:
                         'data': None,
                         'error': 'not_found'
                     }])
-                    self.cache.store(cache_key, cache_df, total_results=0, num_pages=1, status='not_found')
+                    self._cache_store(cache_key, cache_df, total_results=0, num_pages=1, status='not_found', error_msg='not_found')
                 else:
                     logger.warning(f"DOI not found (not cached): {doi}")
 
@@ -1074,7 +1288,7 @@ class CrossrefBibliographicFetcher:
                     'data': None,
                     'error': str(e)
                 }])
-                self.cache.store(cache_key, cache_df, total_results=0, num_pages=1, status='error', error_msg=str(e))
+                self._cache_store(cache_key, cache_df, total_results=0, num_pages=1, status='error', error_msg=str(e))
             else:
                 logger.error(f"Error fetching DOI {doi}: {e}")
 
@@ -1131,9 +1345,9 @@ class CrossrefBibliographicFetcher:
         doi_to_cache_key = {doi: f"doi:{doi}" for doi in dois}
 
         # Step 1: Batch cache lookup (if enabled and not force_refresh)
-        if use_batch_cache and not force_refresh and hasattr(self.cache, 'get_many'):
+        if use_batch_cache and not force_refresh:
             logger.info(f"Batch cache lookup for {len(dois)} DOIs...")
-            cached_results = self.cache.get_many(cache_keys)
+            cached_results = self._cache_get_many(cache_keys)
 
             for doi, cache_key in doi_to_cache_key.items():
                 cached = cached_results.get(cache_key)
@@ -1308,8 +1522,13 @@ class CrossrefSearchFetcher(BaseSearchFetcher):
             rows_per_page=kwargs.get('rows_per_page', 100),
         )
         
-        # Initialize client and cache (using SQLite for faster metadata access)
+        # Initialize client
         client = CrossrefSearchClient(config)
+        
+        # Note: CrossrefSearchFetcher still uses SQLiteLocalCache for now
+        # This is a separate class from CrossrefBibliographicFetcher
+        # TODO: Migrate CrossrefSearchFetcher to use SQLiteTableStorage as well
+        from caching import SQLiteLocalCache
         cache = SQLiteLocalCache(
             cache_dir=cache_dir,
             compression=True,
