@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from typing import Optional, Tuple, Union, List
 
 
@@ -553,8 +554,6 @@ class PlotSaver:
             dpi: Default DPI for raster formats
             create_dir: Create directory if it doesn't exist
         """
-        from pathlib import Path
-
         self.output_dir = Path(output_dir)
         self.dpi = dpi
 
