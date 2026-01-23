@@ -102,6 +102,7 @@ def pie_chart(
     other_callback: Optional[callable] = None,
     other_label: str = "Other",
     label_order: Optional[List[str]] = None,
+    label_formatter: Optional[callable] = None,
     **kwargs,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
@@ -121,6 +122,7 @@ def pie_chart(
         other_callback: Custom function (label, value) -> bool to determine if item goes to "Other"
         other_label: Label for grouped items (default: "Other")
         label_order: Custom order for labels (list of label names). Labels not in list are appended at end.
+        label_formatter: Custom function to format labels. Receives (label, value, percentage, total) and returns formatted string.
         **kwargs: Additional args passed to plt.pie()
 
     Returns:
@@ -142,6 +144,15 @@ def pie_chart(
 
         >>> # Custom grouping logic
         >>> fig, ax = pie_chart(counts, other_callback=lambda label, value: value < 5 or 'misc' in label.lower())
+
+        >>> # Custom label formatting (e.g., for version counts with pluralization)
+        >>> def format_versions(label, value, percentage, total):
+        ...     if label == "Other":
+        ...         return f"Other ({percentage:.1f}%)"
+        ...     num = int(label)
+        ...     word = "version" if num == 1 else "versions"
+        ...     return f"{num} {word} ({percentage:.1f}%)"
+        >>> fig, ax = pie_chart(counts, label_formatter=format_versions)
     """
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -234,6 +245,18 @@ def pie_chart(
             values = new_values
             label_list = new_labels
 
+    # Apply label formatter if provided
+    if label_formatter is not None:
+        total = sum(values)
+        percentages = [100 * v / total for v in values]
+
+        final_labels = [
+            label_formatter(label=label, value=value, percentage=pct, total=total)
+            for label, value, pct in zip(label_list, values, percentages)
+        ]
+    else:
+        final_labels = label_list
+
     # Plot with or without labels on slices
     autopct = "%1.1f%%" if show_percentages else None
 
@@ -253,17 +276,17 @@ def pie_chart(
         # Add legend below the pie (better for long labels)
         ax.legend(
             wedges,
-            label_list,
+            final_labels,
             loc="upper center",
             bbox_to_anchor=(0.5, -0.02),  # Very close to pie edge
-            ncol=min(3, len(label_list)),  # Max 3 columns
+            ncol=min(3, len(final_labels)),  # Max 3 columns
             frameon=False,
         )
     else:
         # Show labels on slices
         wedges, texts, autotexts = ax.pie(
             values,
-            labels=label_list,
+            labels=final_labels,
             colors=colors,
             autopct=autopct,
             startangle=startangle,
@@ -471,19 +494,94 @@ def hbar_plot(
     return fig, ax
 
 
-def save_plot(fig: plt.Figure, filepath: str, dpi: int = 300, **kwargs):
+def save_plot(fig_or_tuple: Union[plt.Figure, Tuple[plt.Figure, plt.Axes]], filepath: str, dpi: int = 300, **kwargs):
     """
     Save plot with high quality.
 
     Args:
-        fig: Figure to save
+        fig_or_tuple: Figure to save, or (fig, ax) tuple from plotting functions
         filepath: Output path (extension determines format: .png, .pdf, .svg)
         dpi: Resolution for raster formats
         **kwargs: Additional args passed to fig.savefig()
 
-    Example:
+    Examples:
+        >>> # Option 1: Unpack tuple
         >>> fig, ax = histogram(df, 'values')
         >>> save_plot(fig, 'my_histogram.png')
+
+        >>> # Option 2: Pass tuple directly (more convenient)
+        >>> save_plot(histogram(df, 'values'), 'my_histogram.png')
+        >>> save_plot(pie_chart(counts, title='Distribution'), 'pie.png')
     """
+    # Handle both fig and (fig, ax) tuple
+    if isinstance(fig_or_tuple, tuple):
+        fig = fig_or_tuple[0]
+    else:
+        fig = fig_or_tuple
+
     fig.savefig(filepath, dpi=dpi, bbox_inches="tight", **kwargs)
     print(f"✓ Saved: {filepath}")
+
+
+class PlotSaver:
+    """
+    Helper class for saving plots to a default directory.
+
+    Useful for keeping all plots organized in one place without
+    repeating the directory path every time.
+
+    Example:
+        >>> from pathlib import Path
+        >>> saver = PlotSaver(Path('figures'))
+        >>>
+        >>> # Save to figures/distribution.png
+        >>> saver.save(pie_chart(counts), 'distribution.png')
+        >>>
+        >>> # Save to figures/subfolder/plot.pdf
+        >>> saver.save(histogram(data), 'subfolder/plot.pdf')
+        >>>
+        >>> # Quick save with just the name
+        >>> saver(bar_plot(df, 'x', 'y'), 'bars.png')
+    """
+
+    def __init__(self, output_dir: Union[str, Path], dpi: int = 300, create_dir: bool = True):
+        """
+        Initialize plot saver.
+
+        Args:
+            output_dir: Default directory for saving plots
+            dpi: Default DPI for raster formats
+            create_dir: Create directory if it doesn't exist
+        """
+        from pathlib import Path
+
+        self.output_dir = Path(output_dir)
+        self.dpi = dpi
+
+        if create_dir:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def save(
+        self,
+        fig_or_tuple: Union[plt.Figure, Tuple[plt.Figure, plt.Axes]],
+        filename: str,
+        dpi: Optional[int] = None,
+        **kwargs,
+    ):
+        """
+        Save plot to output directory.
+
+        Args:
+            fig_or_tuple: Figure or (fig, ax) tuple
+            filename: Filename (can include subdirectories)
+            dpi: Override default DPI
+            **kwargs: Additional args passed to savefig()
+        """
+        filepath = self.output_dir / filename
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        save_plot(fig_or_tuple, filepath, dpi=dpi or self.dpi, **kwargs)
+
+    def __call__(self, fig_or_tuple, filename: str, dpi: Optional[int] = None, **kwargs):
+        """Shorthand for save()."""
+        self.save(fig_or_tuple, filename, dpi=dpi, **kwargs)
