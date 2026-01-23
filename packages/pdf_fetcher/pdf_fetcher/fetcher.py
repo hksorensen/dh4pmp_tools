@@ -23,7 +23,8 @@ from dataclasses import dataclass
 
 # Set global socket timeout to prevent indefinite blocking in C code
 # This is a fallback for when requests timeouts don't work (e.g., stuck in SSL handshake)
-socket.setdefaulttimeout(60)
+# Reduced from 60s to 15s to make Ctrl+C more responsive
+socket.setdefaulttimeout(15)
 
 from .utils import sanitize_doi_to_filename
 
@@ -125,6 +126,7 @@ class PDFFetcher:
     def _signal_handler(cls, signum, frame):
         """Handle Ctrl+C and SIGTERM gracefully."""
         import os
+        import sys
 
         cls._interrupt_count += 1
         cls._interrupted = True
@@ -132,15 +134,33 @@ class PDFFetcher:
         if cls._interrupt_count == 1:
             signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
             logger.warning(f"\n⚠ {signal_name} received - shutting down gracefully...")
-            logger.warning("  (Press Ctrl+C again to force quit)")
+            logger.warning("  (Press Ctrl+C again to force quit, or wait 3s for automatic force quit)")
 
             # Shutdown executor immediately without waiting
             if cls._current_executor is not None:
                 logger.warning("  Cancelling pending downloads...")
                 cls._current_executor.shutdown(wait=False, cancel_futures=True)
+
+            # Start a watchdog timer - if we don't exit cleanly in 3 seconds, force quit
+            import threading
+            def force_quit_watchdog():
+                time.sleep(3)
+                if cls._interrupted:
+                    # Force quit even if stdout is closed
+                    try:
+                        logger.error("\n⚠ Failed to shutdown cleanly after 3s - forcing exit")
+                    except:
+                        pass
+                    os._exit(1)
+
+            watchdog = threading.Thread(target=force_quit_watchdog, daemon=True)
+            watchdog.start()
         else:
-            # Second interrupt - force quit immediately
-            logger.warning(f"\n⚠ Force quit (interrupt #{cls._interrupt_count})")
+            # Second interrupt - force quit immediately, no mercy
+            try:
+                logger.warning(f"\n⚠ Force quit (interrupt #{cls._interrupt_count})")
+            except:
+                pass  # Logger might be broken, just exit
             os._exit(1)
 
     @classmethod
@@ -443,6 +463,14 @@ class PDFFetcher:
         Returns:
             DownloadResult with status and details
         """
+        # Check for interrupt at the start
+        if self._interrupted:
+            return DownloadResult(
+                identifier=identifier,
+                status="skipped",
+                error_reason="Interrupted by user"
+            )
+
         # Check if should download (skip check if force=True)
         if not force:
             should_dl, reason = self.should_download(identifier)
@@ -563,6 +591,15 @@ class PDFFetcher:
         last_postpone_reason = None  # Track if any strategy wants to postpone
 
         for strategy in strategies_to_try:
+            # Check for interrupt before each strategy attempt
+            if self._interrupted:
+                logger.debug(f"Interrupted before trying {strategy.__class__.__name__}")
+                return DownloadResult(
+                    identifier=identifier,
+                    status="skipped",
+                    error_reason="Interrupted by user"
+                )
+
             logger.debug(f"Trying {strategy.__class__.__name__} for {identifier}")
             last_strategy = strategy
 
@@ -614,6 +651,16 @@ class PDFFetcher:
                 max_total_time = self.timeout * 2  # Total download timeout (e.g., 60s)
 
                 for chunk in pdf_response.iter_content(chunk_size=8192):
+                    # Check for interrupt during download
+                    if self._interrupted:
+                        logger.debug(f"Download interrupted for {identifier}")
+                        pdf_response.close()
+                        return DownloadResult(
+                            identifier=identifier,
+                            status="skipped",
+                            error_reason="Interrupted by user"
+                        )
+
                     now = time.time()
 
                     # Check total download time (prevents slow-drip attacks)
@@ -875,188 +922,231 @@ class PDFFetcher:
 
         # Download the remaining identifiers in parallel, processing in batches
         if to_download:
-            logger.info(f"Starting parallel downloads for {len(to_download)} papers (batch size: {batch_size})")
-            
-            # Split into batches
-            num_batches = (len(to_download) + batch_size - 1) // batch_size  # Ceiling division
-            if num_batches > 1:
-                logger.info(f"Processing {len(to_download)} identifiers in {num_batches} batches of up to {batch_size} each")
-            
-            for batch_num, batch_start in enumerate(range(0, len(to_download), batch_size), 1):
-                # Check if interrupted by Ctrl+C
-                if self._interrupted:
-                    logger.warning(f"⚠ Interrupted - stopping after {batch_num - 1} batches")
-                    break
+            # Check if sequential mode (max_workers=1 means no parallelism)
+            if self.max_workers == 1:
+                logger.info(f"Starting SEQUENTIAL downloads for {len(to_download)} papers (no parallel processing)")
+                logger.info("  This avoids timeout issues but is slower. Set max_workers > 1 for parallel downloads.")
 
-                batch_end = min(batch_start + batch_size, len(to_download))
-                batch_identifiers = to_download[batch_start:batch_end]
+                # Sequential download - simple loop
+                for identifier in to_download:
+                    if self._interrupted:
+                        logger.warning("⚠ Interrupted - stopping downloads")
+                        break
 
-                if num_batches > 1:
-                    logger.info(f"Processing batch {batch_num}/{num_batches} ({len(batch_identifiers)} identifiers)")
-                
-                # Check for ArXiv rate limiting and filter out ArXiv identifiers if needed
-                # Import ArxivStrategy to check rate limit flag
-                from .strategies.arxiv import ArxivStrategy
+                    result = self.fetch(identifier, force=force)
+                    results.append(result)
 
-                batch_to_submit = []
-                arxiv_skipped = []
-
-                for identifier in batch_identifiers:
-                    # Check if this is ArXiv and if ArXiv is rate limited
-                    if self._is_arxiv_identifier(identifier) and ArxivStrategy.is_rate_limited():
-                        # Skip this ArXiv paper - add to postponed results
-                        arxiv_skipped.append(identifier)
-                    else:
-                        batch_to_submit.append(identifier)
-
-                # Create postponed results for skipped ArXiv papers
-                if arxiv_skipped:
-                    logger.warning(f"⏸ Skipping {len(arxiv_skipped)} ArXiv papers (rate limit active)")
-                    for identifier in arxiv_skipped:
-                        results.append(
-                            DownloadResult(
-                                identifier=identifier,
-                                status="postponed",
-                                error_reason="ArXiv rate limited - batch paused to avoid hammering servers",
-                            )
-                        )
+                    # Track status
+                    if result.status == 'success':
+                        if result.strategy_used == 'PreExistingFile':
+                            status_counts['pre_existing'] += 1
+                        else:
+                            status_counts['success'] += 1
+                    elif result.status == 'failure':
+                        status_counts['failure'] += 1
+                    elif result.status == 'postponed':
                         status_counts['postponed'] += 1
-                        completed_count += 1
-                        if progress_callback:
-                            progress_callback(completed_count, total)
+                    elif result.status == 'skipped':
+                        status_counts['skipped'] += 1
 
-                # Use manual executor management (not context manager) to allow shutdown(wait=False) on timeout
-                executor = ThreadPoolExecutor(max_workers=self.max_workers)
-                PDFFetcher._current_executor = executor  # Store for signal handler
-                timed_out = False
-                try:
-                    # Submit only identifiers that need downloading (and aren't rate-limited ArXiv)
-                    future_to_id = {
-                        executor.submit(self.fetch, identifier, force=force): identifier
-                        for identifier in batch_to_submit
-                    }
-                    logger.debug(f"Submitted {len(future_to_id)} download tasks for batch {batch_num}")
+                    completed_count += 1
+                    if progress_callback:
+                        progress_callback(completed_count, total)
+            else:
+                # Parallel mode
+                logger.info(f"Starting parallel downloads for {len(to_download)} papers (batch size: {batch_size})")
 
-                    # Collect results using polling instead of blocking as_completed()
-                    # This allows us to respond to Ctrl+C immediately
-                    batch_timeout = self.timeout * 3
-                    batch_start_time = time.time()
-                    pending_futures = set(future_to_id.keys())
+                # Split into batches
+                num_batches = (len(to_download) + batch_size - 1) // batch_size  # Ceiling division
+                if num_batches > 1:
+                    logger.info(f"Processing {len(to_download)} identifiers in {num_batches} batches of up to {batch_size} each")
 
-                    while pending_futures and not self._interrupted:
-                        # Check batch timeout
-                        elapsed = time.time() - batch_start_time
-                        if elapsed > batch_timeout:
-                            timed_out = True
-                            logger.error(f"⏱ Batch TIMEOUT after {batch_timeout}s (batch {batch_num})")
-                            break
+                for batch_num, batch_start in enumerate(range(0, len(to_download), batch_size), 1):
+                # Check if interrupted by Ctrl+C
+                    if self._interrupted:
+                        logger.warning(f"⚠ Interrupted - stopping after {batch_num - 1} batches")
+                        break
 
-                        # Poll for completed futures (non-blocking check)
-                        newly_done = {f for f in pending_futures if f.done()}
+                    batch_end = min(batch_start + batch_size, len(to_download))
+                    batch_identifiers = to_download[batch_start:batch_end]
 
-                        if not newly_done:
-                            # No futures completed yet - short sleep and check again
-                            time.sleep(0.1)
-                            continue
-
-                        # Process completed futures
-                        for future in newly_done:
-                            pending_futures.remove(future)
-                            identifier = future_to_id[future]
-
-                            try:
-                                # Future is done, so result() should return immediately
-                                # But add a small timeout just in case
-                                result = future.result(timeout=1.0)
-                                results.append(result)
-
-                                # Track status for progress bar
-                                if result.status == 'success':
-                                    # Distinguish between newly downloaded and pre-existing files
-                                    if result.strategy_used == 'PreExistingFile':
-                                        status_counts['pre_existing'] += 1
-                                    else:
-                                        status_counts['success'] += 1
-                                elif result.status == 'failure':
-                                    status_counts['failure'] += 1
-                                elif result.status == 'postponed':
-                                    status_counts['postponed'] += 1
-                                elif result.status == 'skipped':
-                                    status_counts['skipped'] += 1
-
-                            except TimeoutError:
-                                # Shouldn't happen since future.done() was True
-                                logger.error(f"⏱ TIMEOUT getting result for {identifier}")
-                                result = DownloadResult(
-                                    identifier=identifier,
-                                    status="failure",
-                                    error_reason="Timeout getting result",
-                                )
-                                results.append(result)
-                                status_counts['failure'] += 1
-
-                            except Exception as e:
-                                logger.error(f"Error processing {identifier}: {e}")
-                                result = DownloadResult(
-                                    identifier=identifier, status="failure", error_reason=str(e)
-                                )
-                                results.append(result)
-                                status_counts['failure'] += 1
-
-                            completed_count += 1
-                            if progress_callback:
-                                progress_callback(completed_count, total)
-
-                        # Brief pause to avoid busy-waiting
-                        time.sleep(0.05)
-
-                    # Handle remaining pending futures (timeout or interrupted)
-                    if pending_futures:
-                        if self._interrupted:
-                            logger.warning(f"⚠ Interrupted - {len(pending_futures)} downloads still pending")
-                        elif timed_out:
-                            logger.warning(f"⏸ Timeout - {len(pending_futures)} downloads will be postponed for retry")
-                            logger.info(f"   {len(future_to_id)} tasks submitted, {len(future_to_id) - len(pending_futures)} completed")
-
-                        for future in pending_futures:
-                            doi = future_to_id[future]
-                            reason = "Interrupted by user" if self._interrupted else f"Download timeout (will retry)"
-
-                            if not self._interrupted:
-                                logger.debug(f"   ⏸ Postponed: {doi}")
-
-                            # Don't add to postponed_cache for timeouts - they're likely temporary
-                            # The postponed_cache is for known-bad domains/papers, not transient issues
-
-                            # Create postponed result (will retry on next run)
-                            result = DownloadResult(
-                                identifier=doi,
-                                status="postponed",
-                                error_reason=reason,
-                            )
-                            results.append(result)
-                            status_counts['postponed'] += 1
-
-                            # Record in database with should_retry=True (timeouts are often temporary)
-                            if self.db and not self._interrupted:
-                                self.db.record_failure(doi, reason, should_retry=True)
-
-                            completed_count += 1
-                            if progress_callback:
-                                progress_callback(completed_count, total)
-
-                finally:
-                    # ALWAYS use wait=False to avoid hanging on shutdown
-                    # The threads may keep running but at least we can exit
-                    logger.debug(f"Executor shutdown (batch {batch_num})")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    PDFFetcher._current_executor = None  # Clear executor reference
+                    if num_batches > 1:
+                        logger.info(f"Processing batch {batch_num}/{num_batches} ({len(batch_identifiers)} identifiers)")
                 
-                # Brief pause between batches to avoid overwhelming the system
-                if batch_num < num_batches:
-                    time.sleep(0.5)
+                    # Check for ArXiv rate limiting and filter out ArXiv identifiers if needed
+                    # Import ArxivStrategy to check rate limit flag
+                    from .strategies.arxiv import ArxivStrategy
 
-        # Close progress bar if we created one
+                    batch_to_submit = []
+                    arxiv_skipped = []
+
+                    for identifier in batch_identifiers:
+                        # Check if this is ArXiv and if ArXiv is rate limited
+                        if self._is_arxiv_identifier(identifier) and ArxivStrategy.is_rate_limited():
+                            # Skip this ArXiv paper - add to postponed results
+                            arxiv_skipped.append(identifier)
+                        else:
+                            batch_to_submit.append(identifier)
+
+                    # Create postponed results for skipped ArXiv papers
+                    if arxiv_skipped:
+                        logger.warning(f"⏸ Skipping {len(arxiv_skipped)} ArXiv papers (rate limit active)")
+                        for identifier in arxiv_skipped:
+                            results.append(
+                                DownloadResult(
+                                    identifier=identifier,
+                                    status="postponed",
+                                    error_reason="ArXiv rate limited - batch paused to avoid hammering servers",
+                                )
+                            )
+                            status_counts['postponed'] += 1
+                            completed_count += 1
+                            if progress_callback:
+                                progress_callback(completed_count, total)
+
+                    # Use manual executor management (not context manager) to allow shutdown(wait=False) on timeout
+                    # Use daemon threads so they die when main thread exits (helps with Ctrl+C responsiveness)
+                    executor = ThreadPoolExecutor(
+                        max_workers=self.max_workers,
+                        thread_name_prefix="PDFFetcher",
+                        # Note: ThreadPoolExecutor doesn't have a daemon parameter, so we'll set it after creation
+                    )
+                    # Make all worker threads daemon threads for better Ctrl+C handling
+                    # This is a bit hacky but necessary for clean shutdown
+                    for thread in threading.enumerate():
+                        if thread.name.startswith("PDFFetcher"):
+                            thread.daemon = True
+
+                    PDFFetcher._current_executor = executor  # Store for signal handler
+                    timed_out = False
+                    try:
+                        # Submit only identifiers that need downloading (and aren't rate-limited ArXiv)
+                        future_to_id = {
+                            executor.submit(self.fetch, identifier, force=force): identifier
+                            for identifier in batch_to_submit
+                        }
+                        logger.debug(f"Submitted {len(future_to_id)} download tasks for batch {batch_num}")
+
+                        # Collect results using polling instead of blocking as_completed()
+                        # This allows us to respond to Ctrl+C immediately
+                        batch_timeout = self.timeout * 3
+                        batch_start_time = time.time()
+                        pending_futures = set(future_to_id.keys())
+
+                        while pending_futures and not self._interrupted:
+                            # Check batch timeout
+                            elapsed = time.time() - batch_start_time
+                            if elapsed > batch_timeout:
+                                timed_out = True
+                                logger.error(f"⏱ Batch TIMEOUT after {batch_timeout}s (batch {batch_num})")
+                                break
+
+                            # Poll for completed futures (non-blocking check)
+                            newly_done = {f for f in pending_futures if f.done()}
+
+                            if not newly_done:
+                                # No futures completed yet - short sleep and check again
+                                time.sleep(0.1)
+                                continue
+
+                            # Process completed futures
+                            for future in newly_done:
+                                pending_futures.remove(future)
+                                identifier = future_to_id[future]
+
+                                try:
+                                    # Future is done, so result() should return immediately
+                                    # But add a small timeout just in case
+                                    result = future.result(timeout=1.0)
+                                    results.append(result)
+
+                                    # Track status for progress bar
+                                    if result.status == 'success':
+                                        # Distinguish between newly downloaded and pre-existing files
+                                        if result.strategy_used == 'PreExistingFile':
+                                            status_counts['pre_existing'] += 1
+                                        else:
+                                            status_counts['success'] += 1
+                                    elif result.status == 'failure':
+                                        status_counts['failure'] += 1
+                                    elif result.status == 'postponed':
+                                        status_counts['postponed'] += 1
+                                    elif result.status == 'skipped':
+                                        status_counts['skipped'] += 1
+
+                                except TimeoutError:
+                                    # Shouldn't happen since future.done() was True
+                                    logger.error(f"⏱ TIMEOUT getting result for {identifier}")
+                                    result = DownloadResult(
+                                        identifier=identifier,
+                                        status="failure",
+                                        error_reason="Timeout getting result",
+                                    )
+                                    results.append(result)
+                                    status_counts['failure'] += 1
+
+                                except Exception as e:
+                                    logger.error(f"Error processing {identifier}: {e}")
+                                    result = DownloadResult(
+                                        identifier=identifier, status="failure", error_reason=str(e)
+                                    )
+                                    results.append(result)
+                                    status_counts['failure'] += 1
+
+                                completed_count += 1
+                                if progress_callback:
+                                    progress_callback(completed_count, total)
+
+                            # Brief pause to avoid busy-waiting
+                            time.sleep(0.05)
+
+                        # Handle remaining pending futures (timeout or interrupted)
+                        if pending_futures:
+                            if self._interrupted:
+                                logger.warning(f"⚠ Interrupted - {len(pending_futures)} downloads still pending")
+                            elif timed_out:
+                                logger.warning(f"⏸ Timeout - {len(pending_futures)} downloads will be postponed for retry")
+                                logger.info(f"   {len(future_to_id)} tasks submitted, {len(future_to_id) - len(pending_futures)} completed")
+
+                            for future in pending_futures:
+                                doi = future_to_id[future]
+                                reason = "Interrupted by user" if self._interrupted else f"Download timeout (will retry)"
+
+                                if not self._interrupted:
+                                    logger.debug(f"   ⏸ Postponed: {doi}")
+
+                                # Don't add to postponed_cache for timeouts - they're likely temporary
+                                # The postponed_cache is for known-bad domains/papers, not transient issues
+
+                                # Create postponed result (will retry on next run)
+                                result = DownloadResult(
+                                    identifier=doi,
+                                    status="postponed",
+                                    error_reason=reason,
+                                )
+                                results.append(result)
+                                status_counts['postponed'] += 1
+
+                                # Record in database with should_retry=True (timeouts are often temporary)
+                                if self.db and not self._interrupted:
+                                    self.db.record_failure(doi, reason, should_retry=True)
+
+                                completed_count += 1
+                                if progress_callback:
+                                    progress_callback(completed_count, total)
+
+                    finally:
+                        # ALWAYS use wait=False to avoid hanging on shutdown
+                        # The threads may keep running but at least we can exit
+                        logger.debug(f"Executor shutdown (batch {batch_num})")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        PDFFetcher._current_executor = None  # Clear executor reference
+                
+                    # Brief pause between batches to avoid overwhelming the system
+                    if batch_num < num_batches:
+                        time.sleep(0.5)
+
+            # Close progress bar if we created one
         if pbar:
             pbar.close()
             # Print summary with icons
