@@ -1,11 +1,12 @@
 """
 Caching utilities for API data and string-based tracking.
 
-Provides two complementary caching systems:
+Provides complementary caching systems:
 - LocalCache: For DataFrame/heavy data with pickle storage (JSON metadata)
 - SQLiteLocalCache: For DataFrame/heavy data with SQLite metadata (faster)
 - StringCache: For lightweight string data with status tracking
 - SQLiteStringCache: Thread-safe SQLite variant for string caching
+- CompressedJSONCache: For JSON-serializable objects with gzip compression (~70% space savings)
 
 Also provides centralized path configuration:
 - get_cache_dir(), get_data_dir(), get_results_dir()
@@ -17,6 +18,7 @@ from .local_cache import LocalCache, MultiQueryCache
 from .sqlite_local_cache import SQLiteLocalCache
 from .string_cache import StringCache
 from .sqlite_string_cache import SQLiteStringCache
+from .compressed_json_cache import CompressedJSONCache
 from .path_config import (
     get_cache_dir,
     get_data_dir,
@@ -26,7 +28,7 @@ from .path_config import (
     print_path_config,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     'LocalCache',
@@ -34,6 +36,7 @@ __all__ = [
     'MultiQueryCache',
     'StringCache',
     'SQLiteStringCache',
+    'CompressedJSONCache',
     'get_cache_dir',
     'get_data_dir',
     'get_results_dir',
