@@ -5,6 +5,7 @@ Provides higher-level operations for storing and retrieving data with support
 for JSON encoding, gzip compression, and ID-based record management.
 
 Backend-agnostic: Works with SQLite, MySQL, or any database backend.
+ATT: MySQLTableStorage is not completely agnostic as it uses a specific MySQL server per default.
 """
 
 from abc import ABC, abstractmethod
@@ -13,7 +14,8 @@ import numpy as np
 import json
 import gzip
 import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
+from pathlib import Path
 
 
 class TableStorage(ABC):
@@ -31,10 +33,10 @@ class TableStorage(ABC):
         table_name: str,
         column_ID: str = 'ID',
         ID_type: type = str,
-        json_columns: List[str] = None,
-        gzip_columns: List[str] = None,
-        columns: List[str] = None,
-        table_layout: Dict[str, str] = None
+        json_columns: Optional[List[str]] = None,
+        gzip_columns: Optional[List[str]] = None,
+        columns: Optional[List[str]] = None,
+        table_layout: Optional[Dict[str, str]] = None
     ):
         """
         Initialize TableStorage.
@@ -277,11 +279,11 @@ class TableStorage(ABC):
 
     def get(
         self,
-        IDs: List = None,
-        columns: List[str] = None,
+        IDs: Optional[List] = None,
+        columns: Optional[List[str]] = None,
         where_clause: str = 'TRUE',
-        offset: int = None,
-        limit: int = None
+        offset: Optional[int] = None,
+        limit: Optional[int] = None
     ) -> Optional[pd.DataFrame]:
         """
         Retrieve rows from table with flexible filtering.
@@ -380,14 +382,14 @@ class SQLiteTableStorage(TableStorage):
 
     def __init__(
         self,
-        db_path: str,
+        db_path: Union[str, Path],
         table_name: str,
         column_ID: str = 'ID',
         ID_type: type = str,
-        json_columns: List[str] = None,
-        gzip_columns: List[str] = None,
-        columns: List[str] = None,
-        table_layout: Dict[str, str] = None
+        json_columns: Optional[List[str]] = None,
+        gzip_columns: Optional[List[str]] = None,
+        columns: Optional[List[str]] = None,
+        table_layout: Optional[Dict[str, str]] = None
     ):
         """
         Initialize SQLite table storage.
@@ -454,10 +456,10 @@ class MySQLTableStorage(TableStorage):
         table_name: str,
         column_ID: str = 'ID',
         ID_type: type = str,
-        json_columns: List[str] = None,
-        gzip_columns: List[str] = None,
-        columns: List[str] = None,
-        table_layout: Dict[str, str] = None,
+        json_columns: Optional[List[str]] = None,
+        gzip_columns: Optional[List[str]] = None,
+        columns: Optional[List[str]] = None,
+        table_layout: Optional[Dict[str, str]] = None,
         ip: str = 'db.henrikkragh.dk',
         port: int = 3306
     ):
