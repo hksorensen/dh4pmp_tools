@@ -488,17 +488,28 @@ class CrossrefBibliographicFetcher:
         self.client = CrossrefBibliographicClient(config)
         
         # Initialize cache using SQLiteTableStorage (universal database)
-        # Default to research database if not specified
+        # Default path priority:
+        # 1. Migrated cache database (if exists)
+        # 2. Research database (if exists)
+        # 3. New cache database in cache directory
         if db_path is None:
-            # Try to use default research database path
-            default_db = Path.home() / "Documents" / "dh4pmp" / "research" / "diagrams_in_arxiv" / "data" / "research_corpus.db"
-            if default_db.exists():
-                db_path = str(default_db)
+            # Priority 1: Check for migrated cache database
+            migrated_db = Path("~/.cache/crossref_bibliographic.db").expanduser()
+            if migrated_db.exists():
+                db_path = str(migrated_db)
+                logger.info(f"Using migrated cache database: {db_path}")
             else:
-                # Fallback to cache directory location
-                cache_dir = Path("~/.cache/crossref/bibliographic").expanduser()
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                db_path = str(cache_dir / "crossref_cache.db")
+                # Priority 2: Try to use default research database path
+                default_db = Path.home() / "Documents" / "dh4pmp" / "research" / "diagrams_in_arxiv" / "data" / "research_corpus.db"
+                if default_db.exists():
+                    db_path = str(default_db)
+                    logger.info(f"Using research database: {db_path}")
+                else:
+                    # Priority 3: Fallback to cache directory location
+                    cache_dir = Path("~/.cache/crossref/bibliographic").expanduser()
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    db_path = str(cache_dir / "crossref_cache.db")
+                    logger.info(f"Using new cache database: {db_path}")
         else:
             # Convert Path to string if needed
             db_path = str(db_path) if isinstance(db_path, Path) else db_path
@@ -559,12 +570,18 @@ class CrossrefBibliographicFetcher:
             return None
         
         # Check expiration if max_age_days is set
-        where_clause = f"cache_key = '{cache_key}'"
+        # Use parameterized query to avoid SQL injection
         if self.cache_max_age_days is not None:
             cutoff = (datetime.now() - timedelta(days=self.cache_max_age_days)).isoformat()
-            where_clause += f" AND timestamp >= '{cutoff}'"
-        
-        df = self._cache_storage.get(where_clause=where_clause)
+            where_clause = f"cache_key = ? AND timestamp >= ?"
+            # SQLiteTableStorage.get() doesn't support parameters, so we need to escape
+            # For now, use the IDs parameter which is safer
+            df = self._cache_storage.get(IDs=[cache_key])
+            if df is not None and len(df) > 0:
+                # Filter by timestamp
+                df = df[df['timestamp'] >= cutoff] if 'timestamp' in df.columns else df
+        else:
+            df = self._cache_storage.get(IDs=[cache_key])
         if df is None or len(df) == 0:
             return None
         
@@ -602,16 +619,14 @@ class CrossrefBibliographicFetcher:
         if not self._cache_storage.exists():
             return {key: None for key in cache_keys}
         
-        # Build WHERE clause for batch lookup
-        keys_sql = ", ".join(f"'{k}'" for k in cache_keys)
-        where_clause = f"cache_key IN ({keys_sql})"
+        # Use IDs parameter for batch lookup (safer than string formatting)
+        df = self._cache_storage.get(IDs=cache_keys)
         
-        # Check expiration if max_age_days is set
-        if self.cache_max_age_days is not None:
+        # Filter by expiration if max_age_days is set
+        if self.cache_max_age_days is not None and df is not None and len(df) > 0:
             cutoff = (datetime.now() - timedelta(days=self.cache_max_age_days)).isoformat()
-            where_clause += f" AND timestamp >= '{cutoff}'"
-        
-        df = self._cache_storage.get(where_clause=where_clause)
+            if 'timestamp' in df.columns:
+                df = df[df['timestamp'] >= cutoff]
         if df is None or len(df) == 0:
             return {key: None for key in cache_keys}
         
