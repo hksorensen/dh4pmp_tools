@@ -699,7 +699,7 @@ class CrossrefBibliographicFetcher:
     def _cache_get_stats(self) -> Dict[str, Any]:
         """
         Get cache statistics.
-        
+
         Returns:
             Dictionary with cache statistics
         """
@@ -709,20 +709,67 @@ class CrossrefBibliographicFetcher:
                 'total_size_mb': 0.0,
                 'cache_dir': str(self._cache_storage._db._filename),
             }
-        
+
         num_entries = self._cache_storage.size()
-        
+
         # Calculate database file size
         from pathlib import Path
         db_path = Path(self._cache_storage._db._filename)
         total_size = db_path.stat().st_size if db_path.exists() else 0
-        
+
         return {
             'num_entries': num_entries,
             'total_size_mb': total_size / (1024 * 1024),
             'cache_dir': str(db_path),
         }
-    
+
+    def get_cached_dois(self, successful_only: bool = True) -> List[str]:
+        """
+        Get list of DOIs already in cache.
+
+        Useful for filtering DOI lists before batch fetching to avoid
+        redundant cache lookups.
+
+        Args:
+            successful_only: If True, only return DOIs that were successfully
+                           fetched (excludes failed/not-found DOIs).
+                           If False, return all cached DOIs regardless of status.
+                           (default: True)
+
+        Returns:
+            List of DOI strings already in cache
+
+        Example:
+            >>> fetcher = CrossrefBibliographicFetcher()
+            >>> cached_dois = fetcher.get_cached_dois()
+            >>> all_dois = ["10.1234/a", "10.5678/b", ...]
+            >>> uncached_dois = [doi for doi in all_dois if doi not in set(cached_dois)]
+            >>> # Now fetch only uncached DOIs
+            >>> results = fetcher.fetch_by_dois(uncached_dois)
+        """
+        if not self._cache_storage.exists():
+            return []
+
+        # Get all cache entries
+        cache_df = self._cache_storage.get()
+
+        if cache_df is None or len(cache_df) == 0:
+            return []
+
+        # Filter for DOI entries (cache_key starts with "doi:")
+        doi_entries = cache_df[cache_df['cache_key'].str.startswith('doi:')]
+
+        if successful_only:
+            # Only include entries where error is None or empty (successful fetches)
+            doi_entries = doi_entries[
+                doi_entries['error'].isna() | (doi_entries['error'] == '')
+            ]
+
+        # Extract DOIs (remove "doi:" prefix)
+        cached_dois = doi_entries['cache_key'].str.replace('doi:', '', regex=False).tolist()
+
+        return cached_dois
+
     def _load_email(self, api_key_dir: str) -> Optional[str]:
         """Load email from YAML config file (same as CrossrefSearchFetcher)."""
         import yaml
