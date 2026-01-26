@@ -31,6 +31,11 @@ from .utils import sanitize_doi_to_filename
 logger = logging.getLogger(__name__)
 
 
+class NoVPNException(Exception):
+    """Raised when VPN connection is required but not detected."""
+    pass
+
+
 def _deep_merge(base: Dict, override: Dict) -> Dict:
     """
     Deep merge two dictionaries, with override taking precedence.
@@ -890,7 +895,7 @@ class PDFFetcher:
                     is_vpn, current_ip, msg = check_vpn_status(self.require_vpn)
 
                     if not is_vpn:
-                        raise RuntimeError(
+                        raise NoVPNException(
                             f"VPN check failed: {msg}\n"
                             f"Please connect to university VPN before downloading PDFs."
                         )
