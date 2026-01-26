@@ -4,12 +4,15 @@ High-level plotting functions with consistent styling.
 All the things you always have to look up - now in one place!
 """
 
+import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Optional, Tuple, Union, List
+
+logger = logging.getLogger(__name__)
 
 
 def histogram(
@@ -545,7 +548,7 @@ class PlotSaver:
         >>> saver(bar_plot(df, 'x', 'y'), 'bars.png')
     """
 
-    def __init__(self, output_dir: Union[str, Path], dpi: int = 300, create_dir: bool = True):
+    def __init__(self, output_dir: Union[str, Path], dpi: int = 300, create_dir: bool = True, format: str = "png"):
         """
         Initialize plot saver.
 
@@ -556,6 +559,7 @@ class PlotSaver:
         """
         self.output_dir = Path(output_dir)
         self.dpi = dpi
+        self.format = format
 
         if create_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -576,6 +580,9 @@ class PlotSaver:
             dpi: Override default DPI
             **kwargs: Additional args passed to savefig()
         """
+        if not filename.endswith(self.format):
+            logger.error(f"Filename {filename} does not end with {self.format}, adding extension.")
+            filename = f"{filename}.{self.format}"
         filepath = self.output_dir / filename
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
