@@ -784,6 +784,78 @@ class DownloadMetadataDB:
 
         logger.info(f"Marked {identifier} as file missing")
 
+    def mark_for_retry(self, identifier: str):
+        """
+        Mark an entry for retry by resetting attempt count and enabling retry.
+
+        Useful for forcing a re-download of a failed or problematic PDF.
+        Resets attempt_count to 0 and sets should_retry to True.
+
+        Args:
+            identifier: DOI or identifier to mark for retry
+
+        Example:
+            >>> db = DownloadMetadataDB("metadata.db")
+            >>> db.mark_for_retry("2302.00754v3")
+            >>> # Now re-run fetcher - it will retry this identifier
+        """
+        with self._get_connection() as conn:
+            # Check if entry exists
+            existing = conn.execute(
+                "SELECT identifier FROM download_results WHERE identifier = ?",
+                (identifier,)
+            ).fetchone()
+
+            if not existing:
+                logger.warning(f"Cannot mark for retry - identifier not found: {identifier}")
+                return
+
+            # Reset for retry
+            conn.execute(
+                """
+                UPDATE download_results
+                SET attempt_count = 0,
+                    should_retry = 1,
+                    updated_at = ?
+                WHERE identifier = ?
+            """,
+                (datetime.now().isoformat(), identifier),
+            )
+
+        logger.info(f"Marked {identifier} for retry (reset attempt count)")
+
+    def delete_entry(self, identifier: str) -> bool:
+        """
+        Delete an entry from the database.
+
+        Useful for completely removing a download record to force a fresh attempt.
+        Note: This does NOT delete the PDF file itself, only the database entry.
+
+        Args:
+            identifier: DOI or identifier to delete
+
+        Returns:
+            True if entry was deleted, False if not found
+
+        Example:
+            >>> db = DownloadMetadataDB("metadata.db")
+            >>> db.delete_entry("2302.00754v3")
+            >>> # Entry removed - fetcher will treat as never attempted
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM download_results WHERE identifier = ?",
+                (identifier,)
+            )
+            deleted_count = cursor.rowcount
+
+        if deleted_count > 0:
+            logger.info(f"Deleted entry for {identifier}")
+            return True
+        else:
+            logger.warning(f"No entry found to delete: {identifier}")
+            return False
+
     def verify_files(self) -> Dict[str, List[str]]:
         """
         Verify that all successful downloads still exist on disk.
