@@ -63,29 +63,35 @@ class ElsevierTDMStrategy(DownloadStrategy):
             config_path = Path(config_path)
         
         self.config = self._load_config(config_path)
-        
+
+        # Check if strategy is explicitly disabled in config
+        if not self.config.get('enabled', True):
+            logger.info("Elsevier TDM strategy disabled via config (enabled: false)")
+            self._enabled = False
+            return
+
         # API settings
         self.api_key = self.config.get('api_key')
         self.inst_token = self.config.get('inst_token')
         self.api_base = "https://api.elsevier.com/content/article/doi"
-        
+
         # Rate limiting
         rate_config = self.config.get('rate_limit', {})
         self.requests_per_second = rate_config.get('requests_per_second', 5)
         self.max_requests_per_week = rate_config.get('max_requests_per_week', 20000)
-        
+
         # TDM settings
         tdm_config = self.config.get('tdm', {})
         self.format = tdm_config.get('format', 'pdf')
         self.timeout = tdm_config.get('timeout', 30)
         self.max_retries = tdm_config.get('max_retries', 3)
-        
+
         # Rate limiting state
         self._last_request_time = 0
         self._min_delay = 1.0 / self.requests_per_second
         self._request_count = 0
         self._quota_reset_time = time.time() + (7 * 24 * 3600)  # 7 days
-        
+
         # VPN requirement (only enable TDM if on institutional network or have InstToken)
         self.require_vpn = self.config.get('require_vpn', None)  # e.g., "130.225" for AU
 
@@ -126,9 +132,14 @@ class ElsevierTDMStrategy(DownloadStrategy):
     def _load_config(self, config_path: Path) -> Dict:
         """Load configuration from YAML file."""
         if not config_path.exists():
-            logger.error(f"Elsevier config not found: {config_path}")
+            logger.info(
+                f"Elsevier TDM strategy disabled: config not found at {config_path}. "
+                "This strategy is optional and requires an API key from dev.elsevier.com. "
+                "See elsevier.yaml.example in pdf_fetcher package for configuration template. "
+                "PDF downloads will use other available strategies."
+            )
             return {}
-        
+
         try:
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f) or {}

@@ -1,0 +1,70 @@
+# Elsevier TDM (Text and Data Mining) API Configuration
+# ========================================================
+# Place this file at: ~/.config/elsevier.yaml
+#
+# This strategy provides authorized access to Elsevier full-text articles
+# via their official TDM API. It's the PREFERRED method for 10.1016/* DOIs
+# if you have institutional access.
+#
+# Get your API key from: https://dev.elsevier.com/
+# Requires institutional subscription to Elsevier content
+
+# REQUIRED: Enable or disable the strategy
+enabled: true  # Set to false to disable without removing config file
+
+# REQUIRED: Your Elsevier API key from dev.elsevier.com
+api_key: "YOUR_API_KEY_HERE"
+
+# OPTIONAL: Institutional token for off-campus access
+# Without this, TDM may return incomplete PDFs when off-campus
+# Get from your institution's library or Elsevier representative
+inst_token: null
+
+# OPTIONAL: VPN requirement check
+# If set, the strategy will check if you're on the institutional network
+# Set to a network prefix (e.g., "130.225" for Aarhus University)
+# Leave as null to skip VPN check (requires InstToken for off-campus access)
+require_vpn: null  # e.g., "130.225" for AU network
+
+# Rate limiting settings
+rate_limit:
+  # Requests per second (default: 5)
+  # Adjust based on your API tier
+  requests_per_second: 5
+
+  # Weekly request quota (default: 20,000)
+  # Typical for institutional access
+  max_requests_per_week: 20000
+
+# TDM API settings
+tdm:
+  # Format (default: pdf)
+  format: "pdf"
+
+  # Request timeout in seconds (default: 30)
+  timeout: 30
+
+  # Max retries per request (default: 3)
+  max_retries: 3
+
+# =============================================================================
+# Example configurations:
+# =============================================================================
+
+# Minimal config (on-campus only):
+# ---
+# enabled: true
+# api_key: "abc123xyz..."
+# ---
+
+# Full config (works on/off campus):
+# ---
+# enabled: true
+# api_key: "abc123xyz..."
+# inst_token: "def456..."
+# ---
+
+# Disable the strategy:
+# ---
+# enabled: false
+# ---
