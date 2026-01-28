@@ -70,8 +70,17 @@ class ElsevierTDMStrategy(DownloadStrategy):
             self._enabled = False
             return
 
+        # Check for required API key field
+        if 'api_key' not in self.config or not self.config['api_key'] or self.config['api_key'] == "YOUR_API_KEY_HERE":
+            logger.info(
+                "Elsevier TDM strategy disabled: api_key not configured. "
+                f"Please add your API key to {config_path} (see elsevier.yaml.example)"
+            )
+            self._enabled = False
+            return
+
         # API settings
-        self.api_key = self.config.get('api_key')
+        self.api_key = self.config['api_key']
         self.inst_token = self.config.get('inst_token')
         self.api_base = "https://api.elsevier.com/content/article/doi"
 
@@ -95,39 +104,31 @@ class ElsevierTDMStrategy(DownloadStrategy):
         # VPN requirement (only enable TDM if on institutional network or have InstToken)
         self.require_vpn = self.config.get('require_vpn', None)  # e.g., "130.225" for AU
 
-        # Validate configuration
-        if not self.api_key or self.api_key == "YOUR_API_KEY_HERE":
-            logger.warning(
-                "Elsevier API key not configured! "
-                f"Please edit {config_path} and add your API key from dev.elsevier.com"
-            )
-            self._enabled = False
-        else:
-            # Check VPN requirement if configured (and no InstToken)
-            if self.require_vpn and not self.inst_token:
-                try:
-                    from network_utils import check_vpn_status
-                    is_vpn, current_ip, msg = check_vpn_status(self.require_vpn)
-                    if not is_vpn:
-                        logger.warning(
-                            f"Elsevier TDM strategy disabled: {msg}. "
-                            "API returns first-page-only PDFs when off-campus without InstToken. "
-                            "Please connect to VPN or add InstToken to config."
-                        )
-                        self._enabled = False
-                    else:
-                        self._enabled = True
-                        logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}... ({msg})")
-                except ImportError:
+        # Check VPN requirement if configured (and no InstToken)
+        if self.require_vpn and not self.inst_token:
+            try:
+                from network_utils import check_vpn_status
+                is_vpn, current_ip, msg = check_vpn_status(self.require_vpn)
+                if not is_vpn:
                     logger.warning(
-                        "network_utils not installed, cannot check VPN status. "
-                        "Elsevier TDM may return incomplete PDFs if off-campus without InstToken."
+                        f"Elsevier TDM strategy disabled: {msg}. "
+                        "API returns first-page-only PDFs when off-campus without InstToken. "
+                        "Please connect to VPN or add InstToken to config."
                     )
+                    self._enabled = False
+                else:
                     self._enabled = True
-                    logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}...")
-            else:
+                    logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}... ({msg})")
+            except ImportError:
+                logger.warning(
+                    "network_utils not installed, cannot check VPN status. "
+                    "Elsevier TDM may return incomplete PDFs if off-campus without InstToken."
+                )
                 self._enabled = True
                 logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}...")
+        else:
+            self._enabled = True
+            logger.info(f"Elsevier TDM initialized with API key: {self.api_key[:10]}...")
     
     def _load_config(self, config_path: Path) -> Dict:
         """Load configuration from YAML file."""
