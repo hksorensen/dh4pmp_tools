@@ -57,7 +57,7 @@ class GoldenValues:
         self.interactive = interactive
         self.current_values: Dict[str, Any] = {}
         self.mismatches: Dict[str, tuple] = {}  # key -> (expected, got)
-        self.updated_values: Dict[str, Any] = {}  # Values updated interactively
+        self.updated_values: Dict[str, tuple] = {}  # key -> (old_value, new_value)
         self.auto_update_all: bool = False  # Set by 'a' response
 
         # Load existing golden values
@@ -177,7 +177,7 @@ class GoldenValues:
             # Auto-update if 'a' was selected previously
             if self.auto_update_all:
                 logger.info(f"  → Updating (auto-update-all enabled)")
-                self.updated_values[key] = got
+                self.updated_values[key] = (expected, got)  # Store old and new
                 self.current_values[key] = got
                 self._write_file_immediately()
                 return
@@ -190,14 +190,14 @@ class GoldenValues:
                 if not response or response == "Y" or response == "YES":
                     # Update this value
                     logger.info(f"  → Updating this value")
-                    self.updated_values[key] = got
+                    self.updated_values[key] = (expected, got)  # Store old and new
                     self.current_values[key] = got
                     self._write_file_immediately()
                 elif response == "A" or response == "ALL":
                     # Update this and all remaining
                     logger.info(f"  → Updating this and all remaining values")
                     self.auto_update_all = True
-                    self.updated_values[key] = got
+                    self.updated_values[key] = (expected, got)  # Store old and new
                     self.current_values[key] = got
                     self._write_file_immediately()
                 elif response == "N" or response == "NO":
@@ -237,8 +237,9 @@ class GoldenValues:
 
         This ensures updates are persisted even if pipeline crashes.
         """
-        # Merge updated values into golden
-        self.golden.update(self.updated_values)
+        # Merge updated values into golden (extract new values from tuples)
+        for key, (old_val, new_val) in self.updated_values.items():
+            self.golden[key] = new_val
 
         # Ensure directory exists
         self.golden_file.parent.mkdir(parents=True, exist_ok=True)
@@ -278,9 +279,8 @@ class GoldenValues:
             logger.info("GOLDEN VALUES UPDATED")
             logger.info("=" * 70)
             logger.info(f"Updated {len(self.updated_values)} value(s) interactively:")
-            for key, value in self.updated_values.items():
-                old_value = self.golden.get(key, "N/A")
-                logger.info(f"  • {key}: {old_value} → {value}")
+            for key, (old_value, new_value) in self.updated_values.items():
+                logger.info(f"  • {key}: {old_value} → {new_value}")
             logger.info("=" * 70)
 
         # Merge: keep existing values, update checked ones
@@ -288,7 +288,9 @@ class GoldenValues:
             self.golden.update(self.current_values)
         else:
             # Only update the values that were approved interactively
-            self.golden.update(self.updated_values)
+            # (extract new values from tuples)
+            for key, (old_val, new_val) in self.updated_values.items():
+                self.golden[key] = new_val
 
         # Ensure directory exists
         self.golden_file.parent.mkdir(parents=True, exist_ok=True)
