@@ -40,6 +40,7 @@ class GoldenValues:
         golden_file: Union[str, Path],
         update_mode: bool = False,
         strict: bool = True,
+        interactive: bool = True,
     ):
         """
         Initialize golden values tracker.
@@ -48,12 +49,16 @@ class GoldenValues:
             golden_file: Path to YAML file storing golden values
             update_mode: If True, update golden values instead of validating
             strict: If True, raise ValueError on mismatch (if False, just log warning)
+            interactive: If True, prompt for updates on mismatch (Y/n/a)
         """
         self.golden_file = Path(golden_file)
         self.update_mode = update_mode
         self.strict = strict
+        self.interactive = interactive
         self.current_values: Dict[str, Any] = {}
         self.mismatches: Dict[str, tuple] = {}  # key -> (expected, got)
+        self.updated_values: Dict[str, Any] = {}  # Values updated interactively
+        self.auto_update_all: bool = False  # Set by 'a' response
 
         # Load existing golden values
         if self.golden_file.exists():
@@ -167,7 +172,50 @@ class GoldenValues:
 
         logger.error("=" * 70)
 
-        if self.update_mode:
+        # Interactive mode: prompt user
+        if self.interactive and not self.update_mode:
+            # Auto-update if 'a' was selected previously
+            if self.auto_update_all:
+                logger.info(f"  → Updating (auto-update-all enabled)")
+                self.updated_values[key] = got
+                self.current_values[key] = got
+                return
+
+            # Prompt for this specific value
+            print()
+            try:
+                response = input(f"Update this value? (Y/n/a, default=Y): ").strip().upper()
+
+                if not response or response == "Y" or response == "YES":
+                    # Update this value
+                    logger.info(f"  → Updating this value")
+                    self.updated_values[key] = got
+                    self.current_values[key] = got
+                elif response == "A" or response == "ALL":
+                    # Update this and all remaining
+                    logger.info(f"  → Updating this and all remaining values")
+                    self.auto_update_all = True
+                    self.updated_values[key] = got
+                    self.current_values[key] = got
+                elif response == "N" or response == "NO":
+                    # Stop execution
+                    logger.error(f"  → Stopping execution")
+                    msg = f"Golden value mismatch for '{key}' - user chose to stop"
+                    raise ValueError(msg)
+                else:
+                    logger.warning(f"  → Invalid response '{response}', treating as 'n'")
+                    msg = f"Golden value mismatch for '{key}' - invalid response"
+                    raise ValueError(msg)
+
+            except (KeyboardInterrupt, EOFError):
+                print()
+                logger.error("  → Interrupted by user")
+                raise ValueError(f"Golden value mismatch for '{key}' - interrupted")
+
+            print()
+
+        # Non-interactive mode: original behavior
+        elif self.update_mode:
             logger.warning(f"  → Will update golden value (update_mode=True)")
         else:
             msg = (
@@ -184,19 +232,38 @@ class GoldenValues:
         """
         Save current values to golden values file.
 
-        In update_mode: Updates golden values with current values
+        In update_mode or interactive mode (with updates): Updates golden values
         Otherwise: Only logs a message
         """
-        if not self.update_mode:
+        # Check if we have values to save
+        has_updates = self.update_mode or bool(self.updated_values)
+
+        if not has_updates:
             if self.current_values:
                 logger.info(
                     f"Golden values tracked: {len(self.current_values)} values "
-                    f"(not saving, update_mode=False)"
+                    f"(not saving, no updates)"
                 )
             return
 
+        # Log summary of interactive updates
+        if self.updated_values:
+            print()
+            logger.info("=" * 70)
+            logger.info("GOLDEN VALUES UPDATED")
+            logger.info("=" * 70)
+            logger.info(f"Updated {len(self.updated_values)} value(s) interactively:")
+            for key, value in self.updated_values.items():
+                old_value = self.golden.get(key, "N/A")
+                logger.info(f"  • {key}: {old_value} → {value}")
+            logger.info("=" * 70)
+
         # Merge: keep existing values, update checked ones
-        self.golden.update(self.current_values)
+        if self.update_mode:
+            self.golden.update(self.current_values)
+        else:
+            # Only update the values that were approved interactively
+            self.golden.update(self.updated_values)
 
         # Ensure directory exists
         self.golden_file.parent.mkdir(parents=True, exist_ok=True)
@@ -211,9 +278,8 @@ class GoldenValues:
                 allow_unicode=True,
             )
 
-        logger.info(f"✓ Updated golden values file: {self.golden_file}")
-        logger.info(f"  Total values: {len(self.golden)}")
-        logger.info(f"  New/updated: {len(self.current_values)}")
+        logger.info(f"✓ Saved golden values file: {self.golden_file}")
+        logger.info(f"  Total values in file: {len(self.golden)}")
 
     def get_all(self) -> Dict[str, Any]:
         """
