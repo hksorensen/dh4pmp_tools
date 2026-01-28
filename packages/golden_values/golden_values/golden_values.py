@@ -179,6 +179,7 @@ class GoldenValues:
                 logger.info(f"  → Updating (auto-update-all enabled)")
                 self.updated_values[key] = got
                 self.current_values[key] = got
+                self._write_file_immediately()
                 return
 
             # Prompt for this specific value
@@ -191,12 +192,14 @@ class GoldenValues:
                     logger.info(f"  → Updating this value")
                     self.updated_values[key] = got
                     self.current_values[key] = got
+                    self._write_file_immediately()
                 elif response == "A" or response == "ALL":
                     # Update this and all remaining
                     logger.info(f"  → Updating this and all remaining values")
                     self.auto_update_all = True
                     self.updated_values[key] = got
                     self.current_values[key] = got
+                    self._write_file_immediately()
                 elif response == "N" or response == "NO":
                     # Stop execution
                     logger.error(f"  → Stopping execution")
@@ -227,6 +230,28 @@ class GoldenValues:
                 raise ValueError(msg)
             else:
                 logger.warning(f"  → Continuing despite mismatch (strict=False)")
+
+    def _write_file_immediately(self) -> None:
+        """
+        Write golden values to file immediately (used after each interactive update).
+
+        This ensures updates are persisted even if pipeline crashes.
+        """
+        # Merge updated values into golden
+        self.golden.update(self.updated_values)
+
+        # Ensure directory exists
+        self.golden_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Save as YAML
+        with open(self.golden_file, 'w') as f:
+            yaml.dump(
+                self.golden,
+                f,
+                sort_keys=True,
+                default_flow_style=False,
+                allow_unicode=True,
+            )
 
     def save(self) -> None:
         """
