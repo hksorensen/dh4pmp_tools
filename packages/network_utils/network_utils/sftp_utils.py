@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional, Union
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 try:
     import paramiko
@@ -77,6 +78,7 @@ class SFTPUploader:
 
         self._ssh_client = None
         self._sftp_client = None
+        self._sftp_lock = Lock()  # Thread-safe SFTP operations
 
     def __enter__(self):
         """Context manager entry - establish connection."""
@@ -199,7 +201,9 @@ class SFTPUploader:
             raise RuntimeError("Not connected - call connect() first")
 
         # Ensure remote directory exists
-        self.mkdir_p(remote_dir)
+        logger.debug(f"Creating remote directory: {remote_dir}")
+        with self._sftp_lock:  # Thread-safe directory creation
+            self.mkdir_p(remote_dir)
         remote_dir = remote_dir.rstrip('/') + '/'
 
         # Convert to Path objects
@@ -233,7 +237,9 @@ class SFTPUploader:
             """Upload single file, return (path, success, error)."""
             remote_path = remote_dir + local_path.name
             try:
-                self._sftp_client.put(str(local_path), remote_path)
+                # Thread-safe SFTP operation (paramiko SFTP client is not thread-safe)
+                with self._sftp_lock:
+                    self._sftp_client.put(str(local_path), remote_path)
                 return (local_path, True, None)
             except Exception as e:
                 return (local_path, False, str(e))
