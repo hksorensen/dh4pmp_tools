@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf_fetcher"
-version = "1.0.0"
+version = "1.0.1"
 description = "Automated academic PDF downloader with publisher-specific strategies and Unpaywall integration"
 readme = "README.md"
 authors = [
