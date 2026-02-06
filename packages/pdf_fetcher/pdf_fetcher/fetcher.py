@@ -630,6 +630,20 @@ class PDFFetcher:
                     stream=True,  # Stream for large PDFs
                 )
 
+                # Validate response (strategy can reject unwanted redirects)
+                is_valid, validation_error = strategy.validate_pdf_response(
+                    identifier=identifier,
+                    requested_url=pdf_url,
+                    response=pdf_response
+                )
+
+                if not is_valid:
+                    logger.warning(
+                        f"{strategy.__class__.__name__}: {validation_error}, trying next strategy"
+                    )
+                    last_error = validation_error
+                    continue  # Try next strategy
+
                 if pdf_response.status_code != 200:
                     error = f"HTTP {pdf_response.status_code}"
                     logger.warning(

@@ -12,10 +12,10 @@ Common patterns:
 - Or: Download button with data-track="click_download_pdf"
 """
 
-#TODO: We need to handle chapters in collections.
-# They are characterized by _XXXX at the end of the DOI (e.g. 10.1007/978-3-030-97182-9_1).
+# NOTE: Book chapter handling implemented via redirect validation (see validate_pdf_response).
+# Chapters have pattern 10.1007/978-*_[digits]. We detect and reject chapter → book redirects.
 
-from typing import Optional, Set
+from typing import Optional, Set, Tuple
 from urllib.parse import urlparse, urljoin
 import logging
 import re
@@ -64,7 +64,45 @@ class SpringerStrategy(DownloadStrategy):
                 return True
         
         return False
-    
+
+    def _is_book_chapter(self, identifier: str) -> bool:
+        """
+        Check if DOI is for a Springer book chapter.
+
+        Book chapters have pattern: 10.1007/978-[ISBN]_[chapter#]
+        Examples:
+        - 10.1007/978-3-030-55777-5_49 → True (chapter 49)
+        - 10.1007/978-3-030-55777-5 → False (entire book)
+        - 10.1007/s10623-024-01403-z → False (journal article)
+        """
+        import re
+        return bool(re.match(r'10\.1007/978-[^/]+_\d+$', identifier))
+
+    def validate_pdf_response(self, identifier: str, requested_url: str, response) -> Tuple[bool, Optional[str]]:
+        """
+        Validate PDF response - detect chapter → book redirects.
+
+        Springer redirects chapter URLs to book URLs by stripping the _XX suffix,
+        causing full book downloads instead of single chapters.
+        """
+        # Only validate for book chapters
+        if not self._is_book_chapter(identifier):
+            return (True, None)
+
+        # For chapters, verify the DOI appears in the final URL
+        final_url = response.url
+
+        if identifier not in final_url:
+            error = (
+                f"Springer redirect detected: chapter URL redirected to book URL. "
+                f"Requested chapter {identifier} but final URL is {final_url}. "
+                f"This would download the entire book instead of the chapter."
+            )
+            logger.warning(error)
+            return (False, error)
+
+        return (True, None)
+
     def get_pdf_url(
         self, 
         identifier: str, 

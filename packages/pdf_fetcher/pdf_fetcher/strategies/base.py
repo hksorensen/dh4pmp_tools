@@ -8,7 +8,7 @@ This is the ONLY contract between fetcher and strategies.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Set
+from typing import Optional, Dict, Set, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -159,20 +159,45 @@ class DownloadStrategy(ABC):
     def get_custom_headers(self, identifier: str) -> Dict[str, str]:
         """
         Custom HTTP headers for this publisher.
-        
+
         Some publishers require specific headers:
         - Referer
         - Accept
         - Custom tokens
-        
+
         Args:
             identifier: Identifier being downloaded
-        
+
         Returns:
             Dict of headers to add (empty by default)
         """
         return {}
-    
+
+    def validate_pdf_response(self, identifier: str, requested_url: str, response) -> Tuple[bool, Optional[str]]:
+        """
+        Validate PDF download response before accepting.
+
+        Called AFTER download but BEFORE saving.
+        Allows strategy to reject responses that don't match expectations.
+
+        Common use cases:
+        - Detect unwanted redirects (e.g., chapter → book)
+        - Verify content-type or response size
+
+        Args:
+            identifier: Original identifier (DOI, etc.)
+            requested_url: URL we requested
+            response: requests.Response object (after redirects)
+
+        Returns:
+            Tuple of (is_valid: bool, error_message: Optional[str])
+            - (True, None) = Valid response, proceed
+            - (False, "reason") = Invalid, reject and try next strategy
+
+        Default: Accept all (backward compatible)
+        """
+        return (True, None)
+
     def preprocess_url(self, url: str) -> str:
         """
         Modify URL before requesting (e.g., add parameters).
