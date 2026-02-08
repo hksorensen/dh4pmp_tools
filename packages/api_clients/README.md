@@ -14,7 +14,8 @@ Unified API client framework for scholarly metadata APIs with shared infrastruct
 ## Supported APIs
 
 - **Scopus** - Elsevier's abstract and citation database
-- **Crossref** - DOI metadata and citations  
+- **Crossref** - DOI metadata and citations
+- **Gemini** - Google AI image generation (Nano Banana / Gemini 2.5 Flash Image)
 - **(Future: OpenAlex, PubMed, arXiv, etc.)**
 
 ## Installation
@@ -69,6 +70,24 @@ results = scopus.fetch("TITLE-ABS-KEY(machine learning)")
 print(f"Found {results.iloc[0]['num_hits']} papers")
 ```
 
+### Gemini Image Generation
+
+```python
+from api_clients import GeminiImageFetcher
+
+# Initialize (auto-loads API key from gemini.yaml)
+fetcher = GeminiImageFetcher()
+
+# Generate image (returns bytes)
+image_bytes = fetcher.generate("A simple red circle on white background")
+if image_bytes:
+    with open("output.png", "wb") as f:
+        f.write(image_bytes)
+
+# Or generate directly to file
+fetcher.generate_to_file("A blue square", "square.png")
+```
+
 ## API Key / Email Configuration
 
 All API config files are stored in: **`~/Documents/dh4pmp/api_keys/`** (by default)
@@ -112,12 +131,22 @@ Create `~/Documents/dh4pmp/api_keys/scopus.yaml`:
 X-ELS-APIKey: your_scopus_api_key_here
 ```
 
+### Gemini API Key Setup (Required for image generation)
+
+Get an API key from https://aistudio.google.com/apikey
+
+Create `~/Documents/dh4pmp/api_keys/gemini.yaml`:
+```yaml
+api_key: your_gemini_api_key_here
+```
+
 ### Directory Structure
 
 ```
 ~/Documents/dh4pmp/api_keys/
 ├── crossref.yaml     # Optional: mailto: your@email.com
-└── scopus.yaml       # Required: X-ELS-APIKey: your_key
+├── scopus.yaml       # Required: X-ELS-APIKey: your_key
+└── gemini.yaml       # Required for image generation: api_key: your_key
 ```
 
 Or use current directory:
@@ -425,4 +454,5 @@ MIT License - feel free to use in your research projects.
 
 ## Version
 
+1.1.0 - Added Gemini image generation (no caching, generative outputs are non-deterministic)  
 1.0.0 - Initial release with Scopus and Crossref support

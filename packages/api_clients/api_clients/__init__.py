@@ -24,7 +24,7 @@ Usage:
     results = scopus.fetch("TITLE-ABS-KEY(machine learning)")
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # Base classes (for advanced users who want to extend)
 from .base_client import (
@@ -33,6 +33,7 @@ from .base_client import (
     APIConfig,
     RateLimiter,
     TokenBucket,
+    parse_429_response,
 )
 
 # Crossref (primary - easiest to use)
@@ -52,6 +53,14 @@ from .scopus_client import (
     ScopusConfig,
 )
 
+# Gemini image generation
+from .gemini_image_client import (
+    GeminiImageClient,
+    GeminiImageFetcher,
+    GeminiImageConfig,
+    get_gemini_api_key,
+)
+
 # NOTE: LocalCache and MultiQueryCache have been moved to the 'caching' package
 # Import from there instead: from caching import LocalCache, MultiQueryCache
 
@@ -62,6 +71,7 @@ __all__ = [
     "CrossrefBibliographicFetcher", # Citation resolution with caching
     "ScopusSearchFetcher",
     "ScopusAbstractFetcher",
+    "GeminiImageFetcher",
     
     # Advanced classes (for extension)
     "BaseAPIClient",
@@ -69,13 +79,17 @@ __all__ = [
     "CrossrefSearchClient",
     "CrossrefBibliographicClient",
     "ScopusSearchClient",
+    "GeminiImageClient",
     
     # Configuration
     "APIConfig",
     "CrossrefConfig",
     "ScopusConfig",
+    "GeminiImageConfig",
+    "get_gemini_api_key",
     
     # Utilities
     "RateLimiter",
     "TokenBucket",
+    "parse_429_response",
 ]

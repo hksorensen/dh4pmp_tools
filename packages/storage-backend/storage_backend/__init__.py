@@ -5,6 +5,7 @@ Provides a clean interface for file storage that works with:
 - Local filesystems (LocalStorage)
 - Remote servers via SSH/SFTP (RemoteStorage)
 - With caching for performance (CachedStorage)
+- Fallback between storages (FallbackStorage)
 - Extensible for future backends (APIStorage, CloudStorage, etc.)
 
 Example usage:
@@ -37,12 +38,14 @@ from .base import StorageBackend
 from .local import LocalStorage
 from .remote import RemoteStorage
 from .cached import CachedStorage
+from .fallback import FallbackStorage
 
 __all__ = [
     "StorageBackend",
     "LocalStorage",
     "RemoteStorage",
     "CachedStorage",
+    "FallbackStorage",
 ]
 
 __version__ = "0.1.0"

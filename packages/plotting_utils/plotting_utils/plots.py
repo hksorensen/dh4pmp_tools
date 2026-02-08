@@ -17,29 +17,36 @@ logger = logging.getLogger(__name__)
 
 def histogram(
     data: Union[pd.Series, pd.DataFrame],
-    column: Optional[str] = None,
+    column: Optional[Union[str, List[str]]] = None,
     bins: Union[int, str] = 30,
     title: Optional[str] = None,
     xlabel: Optional[str] = None,
     ylabel: str = "Frequency",
     figsize: Tuple[int, int] = (10, 6),
-    color: Optional[str] = None,
+    color: Optional[Union[str, List[str]]] = None,
+    alpha: float = 0.6,
+    legend: bool = True,
+    labels: Optional[List[str]] = None,
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     **kwargs,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
-    Create a histogram with sensible defaults.
+    Create a histogram with sensible defaults. Supports overlapping multiple columns.
 
     Args:
         data: DataFrame or Series
-        column: Column name if DataFrame (required for DataFrame)
+        column: Column name (str) or list of column names (List[str]) if DataFrame.
+                For multiple columns, creates overlapping histograms.
         bins: Number of bins or 'auto', 'sturges', 'fd', 'scott'
         title: Plot title
         xlabel: X-axis label (defaults to column name)
         ylabel: Y-axis label
         figsize: Figure size (width, height)
-        color: Bar color (uses default palette if None)
+        color: Bar color or list of colors for multiple columns (uses default palette if None)
+        alpha: Transparency for overlapping histograms (0-1, default 0.6)
+        legend: Show legend for multiple columns (default True)
+        labels: Custom labels for legend (defaults to column names)
         xlim: X-axis limits (min, max)
         ylim: Y-axis limits (min, max)
         **kwargs: Additional args passed to plt.hist()
@@ -47,36 +54,98 @@ def histogram(
     Returns:
         (fig, ax) tuple
 
-    Example:
+    Examples:
+        >>> # Single column
         >>> fig, ax = histogram(df, 'values', bins=50, title='My Distribution')
         >>> fig, ax = histogram(series, xlabel='Score', ylabel='Count')
+
+        >>> # Overlapping histograms
+        >>> fig, ax = histogram(df, column=['group_a', 'group_b'], bins=30)
+        >>> fig, ax = histogram(df, column=['before', 'after'],
+        ...                     labels=['Before Treatment', 'After Treatment'],
+        ...                     color=['steelblue', 'coral'], alpha=0.7)
     """
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Extract data
-    if isinstance(data, pd.DataFrame):
-        if column is None:
-            raise ValueError("Must specify 'column' when data is DataFrame")
-        values = data[column].dropna()
-        xlabel = xlabel or column
-    else:
-        values = data.dropna()
-        xlabel = xlabel or (data.name if hasattr(data, "name") else "Value")
+    # Handle multiple columns (overlapping histograms)
+    if isinstance(column, list):
+        if not isinstance(data, pd.DataFrame):
+            raise ValueError("Must provide DataFrame when column is a list")
+        if len(column) < 1:
+            raise ValueError("column list must contain at least one column")
 
-    # Plot
-    ax.hist(values, bins=bins, color=color, edgecolor="white", linewidth=0.7, **kwargs)
+        # Extract values for each column
+        values_list = [data[col].dropna() for col in column]
+
+        # Compute shared bins for fair comparison
+        if isinstance(bins, str):
+            all_values = pd.concat([data[col].dropna() for col in column])
+            _, bin_edges = np.histogram(all_values, bins=bins)
+            bins = bin_edges
+
+        # Get colors from palette if not specified
+        if color is None:
+            from .style import get_color_palette
+            colors = get_color_palette('default', len(column))
+        elif isinstance(color, list):
+            colors = color
+        else:
+            colors = [color] * len(column)
+
+        # Plot overlapping histograms
+        for i, (col, vals, c) in enumerate(zip(column, values_list, colors)):
+            label = labels[i] if labels else col
+            ax.hist(
+                vals,
+                bins=bins,
+                color=c,
+                alpha=alpha,
+                label=label,
+                edgecolor='white',
+                linewidth=0.7,
+                **kwargs
+            )
+
+        xlabel = xlabel or column[0]
+
+        # Add legend if requested
+        if legend:
+            ax.legend(loc='best', frameon=True)
+
+        # Use integer ticks if all columns contain only integers
+        all_integers = all(
+            all(vals.apply(lambda x: float(x).is_integer()))
+            for vals in values_list
+        )
+        if all_integers:
+            from matplotlib.ticker import MaxNLocator
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    else:
+        # Single column (existing behavior)
+        if isinstance(data, pd.DataFrame):
+            if column is None:
+                raise ValueError("Must specify 'column' when data is DataFrame")
+            values = data[column].dropna()
+            xlabel = xlabel or column
+        else:
+            values = data.dropna()
+            xlabel = xlabel or (data.name if hasattr(data, "name") else "Value")
+
+        # Plot
+        ax.hist(values, bins=bins, color=color, edgecolor="white", linewidth=0.7, **kwargs)
+
+        # Use integer ticks if data contains only integers
+        if all(values.apply(lambda x: float(x).is_integer())):
+            from matplotlib.ticker import MaxNLocator
+
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     # Labels
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
     if title:
         ax.set_title(title, fontsize=14, fontweight="bold")
-
-    # Use integer ticks if data contains only integers
-    if all(values.apply(lambda x: float(x).is_integer())):
-        from matplotlib.ticker import MaxNLocator
-
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     # Limits
     if xlim:
@@ -317,29 +386,34 @@ def pie_chart(
 def bar_plot(
     data: Union[pd.Series, pd.DataFrame],
     x: Optional[str] = None,
-    y: Optional[str] = None,
+    y: Optional[Union[str, List[str]]] = None,
     title: Optional[str] = None,
     xlabel: Optional[str] = None,
     ylabel: Optional[str] = None,
     figsize: Tuple[int, int] = (10, 6),
     color: Optional[str] = None,
+    stacked: bool = False,
+    legend: bool = True,
     rotation: int = 0,
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     **kwargs,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
-    Create a vertical bar plot.
+    Create a vertical bar plot. Supports stacked and grouped bars for multiple columns.
 
     Args:
         data: Series or DataFrame
         x: Column for x-axis (if DataFrame)
-        y: Column for y-axis (if DataFrame)
+        y: Column name (str) or list of column names (List[str]) for y-axis.
+           For multiple columns, creates stacked or grouped bars.
         title: Plot title
         xlabel: X-axis label (auto-detected if None)
         ylabel: Y-axis label (auto-detected if None)
         figsize: Figure size
         color: Bar color
+        stacked: Stack bars when multiple y columns (default False for grouped)
+        legend: Show legend for multiple columns (default True)
         rotation: Rotation angle for x-axis labels (e.g., 45, 90)
         xlim: X-axis limits (for numeric x-axis)
         ylim: Y-axis limits
@@ -353,8 +427,16 @@ def bar_plot(
         >>> counts = df['category'].value_counts()
         >>> fig, ax = bar_plot(counts, title='Category Counts', rotation=45)
 
-        >>> # From DataFrame
+        >>> # From DataFrame (single column)
         >>> fig, ax = bar_plot(df, x='name', y='value', title='Values by Name')
+
+        >>> # Stacked bars
+        >>> fig, ax = bar_plot(df, x='category', y=['val1', 'val2', 'val3'],
+        ...                    stacked=True, title='Stacked Bar Chart')
+
+        >>> # Grouped bars (side-by-side)
+        >>> fig, ax = bar_plot(df, x='category', y=['val1', 'val2'],
+        ...                    stacked=False, title='Grouped Bar Chart')
     """
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -367,7 +449,37 @@ def bar_plot(
         ylabel = ylabel or data.name or "Value"
 
     elif isinstance(data, pd.DataFrame):
-        if x and y:
+        if not (x and y):
+            raise ValueError("Must specify both 'x' and 'y' for DataFrame")
+
+        # Handle multiple columns (stacked/grouped bars)
+        if isinstance(y, list):
+            if len(y) < 1:
+                raise ValueError("y list must contain at least one column")
+
+            # Multi-column bar plot
+            plot_df = data.set_index(x)[y]
+            plot_df.plot(
+                kind='bar',
+                stacked=stacked,
+                ax=ax,
+                color=color,
+                edgecolor='white',
+                linewidth=0.7,
+                **kwargs
+            )
+
+            xlabel = xlabel or x
+            ylabel = ylabel or "Value"
+
+            # Handle legend
+            if legend:
+                ax.legend(loc='best', frameon=True)
+            else:
+                ax.legend().set_visible(False)
+
+        else:
+            # Single column (existing behavior)
             data.plot(
                 x=x,
                 y=y,
@@ -381,8 +493,6 @@ def bar_plot(
             )
             xlabel = xlabel or x
             ylabel = ylabel or y
-        else:
-            raise ValueError("Must specify both 'x' and 'y' for DataFrame")
 
     # Labels
     ax.set_xlabel(xlabel, fontsize=12)
@@ -410,29 +520,34 @@ def bar_plot(
 
 def hbar_plot(
     data: Union[pd.Series, pd.DataFrame],
-    x: Optional[str] = None,
+    x: Optional[Union[str, List[str]]] = None,
     y: Optional[str] = None,
     title: Optional[str] = None,
     xlabel: Optional[str] = None,
     ylabel: Optional[str] = None,
     figsize: Tuple[int, int] = (10, 6),
     color: Optional[str] = None,
+    stacked: bool = False,
+    legend: bool = True,
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     **kwargs,
 ) -> Tuple[plt.Figure, plt.Axes]:
     """
-    Create a horizontal bar plot.
+    Create a horizontal bar plot. Supports stacked and grouped bars for multiple columns.
 
     Args:
         data: Series or DataFrame
-        x: Column for x-axis/values (if DataFrame)
+        x: Column name (str) or list of column names (List[str]) for x-axis/values.
+           For multiple columns, creates stacked or grouped bars.
         y: Column for y-axis/categories (if DataFrame)
         title: Plot title
         xlabel: X-axis label (auto-detected if None)
         ylabel: Y-axis label (auto-detected if None)
         figsize: Figure size
         color: Bar color
+        stacked: Stack bars when multiple x columns (default False for grouped)
+        legend: Show legend for multiple columns (default True)
         xlim: X-axis limits
         ylim: Y-axis limits (for numeric y-axis)
         **kwargs: Additional args passed to pandas plot()
@@ -445,8 +560,16 @@ def hbar_plot(
         >>> counts = df['category'].value_counts().head(10)
         >>> fig, ax = hbar_plot(counts, title='Top 10 Categories')
 
-        >>> # From DataFrame
+        >>> # From DataFrame (single column)
         >>> fig, ax = hbar_plot(df, x='value', y='name', title='Values by Name')
+
+        >>> # Stacked horizontal bars
+        >>> fig, ax = hbar_plot(df, x=['val1', 'val2'], y='category',
+        ...                     stacked=True, title='Stacked Horizontal Bars')
+
+        >>> # Grouped horizontal bars
+        >>> fig, ax = hbar_plot(df, x=['val1', 'val2'], y='category',
+        ...                     stacked=False, title='Grouped Horizontal Bars')
     """
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -459,7 +582,39 @@ def hbar_plot(
         xlabel = xlabel or data.name or "Value"
 
     elif isinstance(data, pd.DataFrame):
-        if x and y:
+        if not (x and y):
+            raise ValueError(
+                "Must specify both 'x' (values) and 'y' (categories) for DataFrame"
+            )
+
+        # Handle multiple columns (stacked/grouped bars)
+        if isinstance(x, list):
+            if len(x) < 1:
+                raise ValueError("x list must contain at least one column")
+
+            # Multi-column horizontal bar plot
+            plot_df = data.set_index(y)[x]
+            plot_df.plot(
+                kind='barh',
+                stacked=stacked,
+                ax=ax,
+                color=color,
+                edgecolor='white',
+                linewidth=0.7,
+                **kwargs
+            )
+
+            ylabel = ylabel or y
+            xlabel = xlabel or "Value"
+
+            # Handle legend
+            if legend:
+                ax.legend(loc='best', frameon=True)
+            else:
+                ax.legend().set_visible(False)
+
+        else:
+            # Single column (existing behavior)
             data.plot(
                 x=y,
                 y=x,
@@ -473,10 +628,6 @@ def hbar_plot(
             )
             ylabel = ylabel or y
             xlabel = xlabel or x
-        else:
-            raise ValueError(
-                "Must specify both 'x' (values) and 'y' (categories) for DataFrame"
-            )
 
     # Labels
     ax.set_xlabel(xlabel, fontsize=12)

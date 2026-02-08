@@ -5,6 +5,15 @@ All notable changes to the api_clients package will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-02-06
+
+### Added
+- `GeminiImageFetcher`: Standalone client for Gemini image generation (Google AI Studio)
+- `GeminiImageClient`: Low-level REST client for generateContent endpoint
+- `GeminiImageConfig`: Configuration (model, rate limits, etc.)
+- No caching (generative outputs are non-deterministic)
+- Tests for image generation (skipped if no API key)
+
 ## [1.0.0] - 2024-12-17
 
 ### Added

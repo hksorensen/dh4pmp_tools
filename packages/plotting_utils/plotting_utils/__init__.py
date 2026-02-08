@@ -12,8 +12,12 @@ Usage:
     fig, ax = bar_plot(counts, title='Categories')
 """
 
+import logging
+
 from .style import setup_style, reset_style, get_color_palette, show_palettes
 from .plots import histogram, pie_chart, bar_plot, hbar_plot, save_plot, PlotSaver
+
+logger = logging.getLogger(__name__)
 
 __version__ = "0.1.0"
 __author__ = "Henrik Kragh Sørensen"
@@ -31,4 +35,6 @@ __all__ = [
     "hbar_plot",
     "save_plot",
     "PlotSaver",
+    # Logger
+    "logger",
 ]

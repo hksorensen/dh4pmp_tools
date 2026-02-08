@@ -25,6 +25,67 @@ from caching import LocalCache
 logger = logging.getLogger(__name__)
 
 
+def parse_429_response(
+    response: requests.Response,
+    default_delay: float = 60.0,
+) -> float:
+    """
+    Parse a 429 rate-limit response for Retry-After and error details.
+
+    Extracts Retry-After header (seconds or HTTP-date) and error message from
+    response body. Logs useful info and returns the wait time in seconds.
+
+    Args:
+        response: The HTTP response with status 429.
+        default_delay: Fallback wait time if Retry-After is absent or invalid.
+
+    Returns:
+        Wait time in seconds before retrying.
+    """
+    wait_time = default_delay
+    retry_after = response.headers.get("Retry-After")
+    error_msg = ""
+
+    if retry_after:
+        try:
+            # Retry-After can be seconds (integer string) or HTTP-date
+            if retry_after.strip().isdigit():
+                wait_time = float(retry_after)
+            else:
+                # HTTP-date: parse and compute seconds until that time
+                from email.utils import parsedate_to_datetime
+
+                retry_dt = parsedate_to_datetime(retry_after)
+                if retry_dt.tzinfo is None:
+                    retry_dt = retry_dt.replace(tzinfo=datetime.timezone.utc)
+                now = datetime.datetime.now(datetime.timezone.utc)
+                wait_time = (retry_dt - now).total_seconds()
+                wait_time = max(0.0, min(wait_time, default_delay * 2))
+        except (ValueError, TypeError, OSError) as e:
+            logger.debug(f"Could not parse Retry-After {retry_after!r}: {e}")
+
+    # Try to extract error message from JSON body (Google/JSON:API style)
+    try:
+        if response.text and response.headers.get("Content-Type", "").startswith("application/json"):
+            data = response.json()
+            error = data.get("error", {}) if isinstance(data, dict) else {}
+            if isinstance(error, dict):
+                error_msg = error.get("message") or error.get("status") or ""
+            elif isinstance(error, str):
+                error_msg = error
+            if error_msg:
+                error_msg = f" {error_msg}"
+    except (ValueError, KeyError, TypeError):
+        pass
+
+    logger.warning(
+        f"Rate limit exceeded (429).{error_msg}"
+        f"{f' Retry-After: {retry_after}' if retry_after else ''}"
+        f" Waiting {wait_time:.1f}s before retry..."
+    )
+    return wait_time
+
+
 @dataclass
 class APIConfig:
     """Base configuration for API clients."""
@@ -195,8 +256,10 @@ class BaseAPIClient(ABC):
             
             # Handle different error codes
             if response.status_code == 429:  # Too Many Requests
-                logger.warning("Rate limit exceeded (429). Waiting before retry...")
-                time.sleep(self.config.max_retry_delay)
+                wait_time = parse_429_response(
+                    response, default_delay=self.config.max_retry_delay
+                )
+                time.sleep(wait_time)
                 return self._retry_request(url, retry_count)
             
             elif response.status_code == 500:  # Server Error
