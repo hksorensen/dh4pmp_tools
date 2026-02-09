@@ -109,6 +109,41 @@ class Storage(ABC):
 - **Fail fast** - exceptions on errors, no silent failures
 - **Production-grade** - proper logging, error messages, cross-platform
 
+## Design Decisions
+
+### Why SSH/rsync instead of SFTP?
+
+**Current approach** uses SSH commands and rsync for remote operations:
+
+**Advantages:**
+- Zero Python dependencies (stdlib only)
+- rsync is highly optimized for large file transfers
+- Built-in delta transfers, compression, and resume capability
+- Native on macOS/Linux systems
+- Excellent performance for bulk operations
+
+**Tradeoffs:**
+- Requires external tools (rsync, ssh) installed on system
+- Less portable to Windows (requires WSL or similar)
+- Shell command construction (need to handle quoting/escaping)
+
+**Alternative: SFTP implementation**
+
+An `SFTPStorage` class using the SFTP protocol (via paramiko or similar) could be added as an alternative:
+
+**Advantages of SFTP:**
+- Purpose-built protocol for remote file operations
+- Pure Python implementation (more portable)
+- Better Windows compatibility
+- Standard, well-understood protocol
+
+**Tradeoffs of SFTP:**
+- Requires external dependency (paramiko ~50KB)
+- Generally slower than rsync for large transfers
+- No automatic delta transfer or resume
+
+**Future possibility:** Add `SFTPStorage` as another Storage implementation for users needing better Windows portability or preferring pure Python solutions. The Storage ABC makes this straightforward to add without affecting existing code.
+
 ## License
 
 MIT
