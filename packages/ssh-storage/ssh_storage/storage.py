@@ -200,19 +200,26 @@ class RemoteStorage(Storage):
             ssh_user: SSH username
             ssh_host: SSH hostname
             ssh_port: SSH port
-            remote_base_dir: Base directory on remote server
+            remote_base_dir: Base directory on remote server (tilde will be expanded remotely)
             ssh_identity_file: Optional SSH key file (limits auth attempts)
         """
         self.ssh_user = ssh_user
         self.ssh_host = ssh_host
         self.ssh_port = ssh_port
-        self.remote_base_dir = remote_base_dir
         self.ssh_identity_file = ssh_identity_file
 
         self.ssh_target = f"{ssh_user}@{ssh_host}"
         self._ssh_args = self._build_ssh_args()
 
-        logger.debug(f"RemoteStorage initialized: {self.ssh_target}:{remote_base_dir}")
+        # Expand tilde on remote machine if present
+        if '~' in remote_base_dir:
+            expanded = self._expand_remote_path(remote_base_dir)
+            self.remote_base_dir = expanded
+            logger.debug(f"RemoteStorage expanded {remote_base_dir} -> {expanded}")
+        else:
+            self.remote_base_dir = remote_base_dir
+
+        logger.debug(f"RemoteStorage initialized: {self.ssh_target}:{self.remote_base_dir}")
 
     def _build_ssh_args(self) -> List[str]:
         """Build SSH command arguments."""
@@ -232,6 +239,25 @@ class RemoteStorage(Storage):
         ])
 
         return args
+
+    def _expand_remote_path(self, path: str) -> str:
+        """Expand tilde in path on the remote machine.
+
+        Args:
+            path: Path that may contain tilde (e.g., "~/pdfs")
+
+        Returns:
+            Expanded absolute path on remote (e.g., "/home/user/pdfs")
+
+        Note:
+            This runs a Python command on the remote to expand the tilde,
+            ensuring it expands to the remote user's home directory.
+        """
+        # Use Python on remote to expand the tilde
+        cmd = f"python3 -c \"from pathlib import Path; print(Path('{path}').expanduser())\""
+        result = self._run_ssh(cmd, check=True)
+        expanded = result.stdout.strip()
+        return expanded
 
     def _run_ssh(self, command: str, check: bool = True) -> subprocess.CompletedProcess:
         """Run SSH command on remote server."""
@@ -328,10 +354,11 @@ class RemoteStorage(Storage):
 
         Note: Returns basenames only, not full paths.
         """
+        # Use find instead of ls for reliable tilde expansion and pattern matching
         if pattern:
-            cmd = f"ls {self.remote_base_dir}/{pattern} 2>/dev/null | xargs -n1 basename"
+            cmd = f"find {self.remote_base_dir}/ -maxdepth 1 -type f -name '{pattern}' -exec basename {{}} \\;"
         else:
-            cmd = f"ls {self.remote_base_dir}/*.pdf 2>/dev/null | xargs -n1 basename"
+            cmd = f"find {self.remote_base_dir}/ -maxdepth 1 -type f -name '*.pdf' -exec basename {{}} \\;"
 
         result = self._run_ssh(cmd, check=False)
 
