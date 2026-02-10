@@ -328,10 +328,11 @@ class RemoteStorage(Storage):
 
         Note: Returns basenames only, not full paths.
         """
+        # Use find instead of ls for reliable tilde expansion and pattern matching
         if pattern:
-            cmd = f"ls {self.remote_base_dir}/{pattern} 2>/dev/null | xargs -n1 basename"
+            cmd = f"find {self.remote_base_dir}/ -maxdepth 1 -type f -name '{pattern}' -exec basename {{}} \\;"
         else:
-            cmd = f"ls {self.remote_base_dir}/*.pdf 2>/dev/null | xargs -n1 basename"
+            cmd = f"find {self.remote_base_dir}/ -maxdepth 1 -type f -name '*.pdf' -exec basename {{}} \\;"
 
         result = self._run_ssh(cmd, check=False)
 
