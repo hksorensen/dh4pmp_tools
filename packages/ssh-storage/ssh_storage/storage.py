@@ -119,6 +119,22 @@ class Storage(ABC):
         """
         pass
 
+    @abstractmethod
+    def read(self, identifier: str) -> bytes:
+        """
+        Read file content as bytes.
+
+        Args:
+            identifier: PDF identifier
+
+        Returns:
+            File content as bytes
+
+        Raises:
+            FileNotFoundError: If file doesn't exist
+        """
+        pass
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
 
@@ -177,6 +193,12 @@ class LocalStorage(Storage):
         if not path.exists():
             raise FileNotFoundError(f"PDF not found: {identifier}")
         return path.stat().st_size
+
+    def read(self, identifier: str) -> bytes:
+        path = self.base_dir / identifier
+        if not path.exists():
+            raise FileNotFoundError(f"PDF not found: {identifier}")
+        return path.read_bytes()
 
     def __repr__(self) -> str:
         return f"LocalStorage(base_dir={self.base_dir})"
@@ -380,6 +402,64 @@ class RemoteStorage(Storage):
 
         return int(result.stdout.strip())
 
+    def read(self, identifier: str) -> bytes:
+        """Download and read file content from remote."""
+        import tempfile
+
+        remote_path = f"{self.remote_base_dir}/{identifier}"
+
+        # Check if file exists first
+        if not self.exists(identifier):
+            raise FileNotFoundError(f"PDF not found on remote: {identifier}")
+
+        # Download to temporary file
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            # Build scp command
+            scp_cmd = ["scp"]
+
+            # Add port if not default
+            if self.ssh_port != 22:
+                scp_cmd.extend(["-P", str(self.ssh_port)])
+
+            # Add identity file if specified
+            if self.ssh_identity_file:
+                identity_path = Path(self.ssh_identity_file).expanduser()
+                scp_cmd.extend(["-o", "IdentitiesOnly=yes", "-i", str(identity_path)])
+
+            # Add connection settings
+            scp_cmd.extend([
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=10",
+            ])
+
+            # Source and destination
+            scp_cmd.extend([
+                f"{self.ssh_target}:{remote_path}",
+                str(tmp_path),
+            ])
+
+            # Download
+            result = subprocess.run(scp_cmd, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                raise IOError(
+                    f"Failed to download {identifier} from remote\n"
+                    f"Return code: {result.returncode}\n"
+                    f"Stderr: {result.stderr}"
+                )
+
+            # Read content
+            content = tmp_path.read_bytes()
+            logger.debug(f"Read {len(content):,} bytes from remote: {identifier}")
+            return content
+
+        finally:
+            # Clean up temp file
+            tmp_path.unlink(missing_ok=True)
+
     def __repr__(self) -> str:
         return f"RemoteStorage(ssh_target={self.ssh_target}, remote_base_dir={self.remote_base_dir})"
 
@@ -489,6 +569,14 @@ class FallbackStorage(Storage):
             return self.primary.size(identifier)
         if self.secondary.exists(identifier):
             return self.secondary.size(identifier)
+        raise FileNotFoundError(f"PDF not found in primary or secondary: {identifier}")
+
+    def read(self, identifier: str) -> bytes:
+        """Read from primary first, then secondary."""
+        if self.primary.exists(identifier):
+            return self.primary.read(identifier)
+        if self.secondary.exists(identifier):
+            return self.secondary.read(identifier)
         raise FileNotFoundError(f"PDF not found in primary or secondary: {identifier}")
 
     def __repr__(self) -> str:
