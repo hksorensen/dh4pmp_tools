@@ -288,7 +288,12 @@ class BaseAPIClient(ABC):
             elif response.status_code == 401:  # Unauthorized
                 logger.error("Authentication failed (401). Check credentials.")
                 raise RuntimeError("Invalid credentials or unauthorized access")
-            
+
+            elif response.status_code == 404:  # Not Found
+                # Return response as-is for caller to handle (resource legitimately absent, not a transient error)
+                logger.debug(f"Resource not found (404): {url[:100]}")
+                return response
+
             else:
                 logger.debug(f"Unexpected status code {response.status_code}")
                 return self._retry_request(url, retry_count)
