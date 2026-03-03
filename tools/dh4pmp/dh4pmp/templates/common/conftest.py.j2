@@ -1,0 +1,11 @@
+"""
+pytest-konfiguration for {{ project_name }}.
+
+Tilføj fixtures og konfig herunder.
+"""
+
+import sys
+from pathlib import Path
+
+# Sikrer at src/ er i Python-stien under tests
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))

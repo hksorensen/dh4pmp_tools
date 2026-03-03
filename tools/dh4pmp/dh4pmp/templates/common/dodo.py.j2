@@ -1,0 +1,37 @@
+"""
+doit pipeline for {{ project_name }}.
+
+Kør: doit          (alle opgaver)
+     doit list     (vis opgaver)
+     doit <task>   (kør specifik opgave)
+
+Dokumentation: https://pydoit.org
+"""
+
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Konfiguration
+# ---------------------------------------------------------------------------
+
+DATA_RAW = Path("data/raw")
+DATA_CACHE = Path("data/cache")
+
+DOIT_CONFIG = {
+    "default_tasks": [],          # Tilføj opgavenavne efterhånden
+    "verbosity": 2,
+}
+
+
+# ---------------------------------------------------------------------------
+# Opgaver – navngiv funktioner task_<navn>
+# ---------------------------------------------------------------------------
+
+# def task_example():
+#     """Eksempel på en doit-opgave."""
+#     return {
+#         "actions": ["echo 'Hello from doit'"],
+#         "targets": [DATA_CACHE / "example.txt"],
+#         "file_dep": [],
+#         "clean": True,
+#     }

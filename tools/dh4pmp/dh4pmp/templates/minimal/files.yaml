@@ -1,0 +1,22 @@
+# Fil-mapping for 'minimal' template
+files:
+  - src: CLAUDE_WORKFLOW.md.j2
+    dst: CLAUDE_WORKFLOW.md
+
+  - src: README.md.j2
+    dst: README.md
+
+  - src: CHANGELOG.md.j2
+    dst: CHANGELOG.md
+
+  - src: gitignore
+    dst: .gitignore
+
+  - src: claude_settings.json.j2
+    dst: .claude/settings.local.json
+
+  - src: cursor_rules.md.j2
+    dst: .cursor/rules
+
+  - src: handoff_log.md.j2
+    dst: handoff/log.md

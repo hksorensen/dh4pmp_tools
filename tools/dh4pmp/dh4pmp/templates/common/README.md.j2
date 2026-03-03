@@ -1,0 +1,32 @@
+# {{ project_name }}
+
+{{ description }}
+
+## Oprettet
+{{ date }} af {{ author }}
+
+## Struktur
+
+```
+{{ project_name }}/
+{% if template == 'full' -%}
+├── data/raw/          # Uændrede kildedata
+├── data/cache/        # Mellemresultater
+├── pipeline/          # doit-tasks og konsoliderede skridt
+├── notebooks/
+│   ├── experiments/   # Udforskning
+│   └── analysis/      # Epistemisk vigtige analyser
+├── tests/
+├── configs/
+├── src/{{ package_name }}/  # Importérbar kode
+└── handoff/           # Overdragelsesdokumenter og logbog
+{% elif template == 'minimal' -%}
+├── notes/             # Noter og kladder
+├── configs/
+└── handoff/           # Overdragelsesdokumenter og logbog
+{% endif %}
+```
+
+## Kom i gang
+
+TODO

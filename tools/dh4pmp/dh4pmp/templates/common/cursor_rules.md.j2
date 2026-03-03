@@ -1,0 +1,48 @@
+# Cursor-regler for {{ project_name }}
+
+## Projekt
+- Navn: `{{ project_name }}`
+- Pakke: `{{ package_name }}`
+- Conda-miljø: `{{ conda_env }}`
+- Oprettet: {{ date }}
+
+## Tilgængelige dh4pmp_tools-pakker
+{% if dh4pmp_package_names %}
+Følgende pakker er installeret og kan importeres:
+{% for name in dh4pmp_package_names %}
+- `{{ name }}`
+{% endfor %}
+{% else %}
+Ingen dh4pmp_tools-pakker opdaget ved oprettelse.
+{% endif %}
+
+## Kodestil
+- Type hints på alle funktioner
+- Docstrings på alle klasser og offentlige funktioner
+- Linjelængde: 100 tegn
+- Formatter: black, linter: ruff
+
+## Mappestruktur
+{% if template == 'full' %}
+- `data/raw/` – uændrede kildedata, rør dem aldrig
+- `data/cache/` – mellemresultater, kan genskabes
+- `pipeline/` – doit-tasks (dodo.py og moduler)
+- `notebooks/experiments/` – udforskning
+- `notebooks/analysis/` – epistemisk vigtige analyser
+- `src/{{ package_name }}/` – importérbar kode
+- `handoff/` – overdragelsesdokumenter og logbog
+{% elif template == 'minimal' %}
+- `notes/` – noter og kladder
+- `configs/` – konfiguration
+- `handoff/` – overdragelsesdokumenter og logbog
+{% endif %}
+
+## Vigtige filer
+- `CLAUDE_WORKFLOW.md` – autoritativ kilde for projektstatus og todo
+- `handoff/log.md` – logbog for sessioner og beslutninger
+{% if template == 'full' %}
+
+## Pipeline
+Projektet bruger doit som pipeline-framework. Kør `doit` fra projektrod.
+Opgaver defineres i `pipeline/` og registreres i `dodo.py`.
+{% endif %}

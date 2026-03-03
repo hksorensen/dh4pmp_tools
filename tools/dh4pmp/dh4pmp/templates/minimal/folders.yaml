@@ -1,0 +1,6 @@
+# Mappestruktur for 'minimal' template
+# Artikel/eksperiment uden pakkestruktur
+folders:
+  - notes
+  - configs
+  - handoff

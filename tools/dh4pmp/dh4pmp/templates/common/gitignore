@@ -1,0 +1,52 @@
+# Secrets og API-nøgler
+*.key
+.env
+api_key.yaml
+api_keys.yaml
+credentials.yaml
+secrets.yaml
+
+# Data og output (typisk for store til git)
+data/
+output/
+results/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Virtuelle miljøer
+venv/
+env/
+.venv/
+
+# Temp
+*.tmp
+*.bak
+*.log
+
+# dh4pmp
+configs/config.yaml

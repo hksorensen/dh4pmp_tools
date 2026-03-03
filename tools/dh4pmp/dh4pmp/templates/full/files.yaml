@@ -1,0 +1,45 @@
+# Fil-mapping for 'full' template
+# src: filnavn i common/ (eller full/ for template-specifikke filer)
+# dst: destination relativt til projektrod (Jinja2-variable tilladt)
+files:
+  - src: CLAUDE_WORKFLOW.md.j2
+    dst: CLAUDE_WORKFLOW.md
+
+  - src: README.md.j2
+    dst: README.md
+
+  - src: CHANGELOG.md.j2
+    dst: CHANGELOG.md
+
+  - src: gitignore
+    dst: .gitignore
+
+  - src: pyproject.toml.j2
+    dst: pyproject.toml
+
+  - src: environment.yaml.j2
+    dst: environment.yaml
+
+  - src: pyrightconfig.json.j2
+    dst: pyrightconfig.json
+
+  - src: config.example.yaml.j2
+    dst: configs/config.example.yaml
+
+  - src: claude_settings.json.j2
+    dst: .claude/settings.local.json
+
+  - src: cursor_rules.md.j2
+    dst: .cursor/rules
+
+  - src: src_init.py.j2
+    dst: src/{{ package_name }}/__init__.py
+
+  - src: dodo.py.j2
+    dst: dodo.py
+
+  - src: conftest.py.j2
+    dst: tests/conftest.py
+
+  - src: handoff_log.md.j2
+    dst: handoff/log.md

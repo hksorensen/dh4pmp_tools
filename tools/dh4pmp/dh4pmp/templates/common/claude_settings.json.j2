@@ -1,0 +1,14 @@
+{
+  "allowedCommands": [
+    {"description": "Run tests", "command": "pytest"},
+    {"description": "Format code", "command": "black ."},
+    {"description": "Lint", "command": "ruff check ."},
+    {"description": "doit pipeline", "command": "doit"}
+  ],
+  "context": {
+    "project": "{{ project_name }}",
+    "package": "{{ package_name }}",
+    "conda_env": "{{ conda_env }}",
+    "dh4pmp_packages": {{ dh4pmp_package_names | tojson }}
+  }
+}

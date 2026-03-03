@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dh4pmp"
+version = "0.1.0"
+description = "Digital Humanities project management CLI"
+authors = [{name = "Henrik Kragh Sørensen"}]
+requires-python = ">=3.9"
+dependencies = [
+    "click>=8.0",
+    "jinja2>=3.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+config = [
+    "dh4pmp-config",
+]
+
+[project.scripts]
+dh4pmp = "dh4pmp.cli.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dh4pmp*"]
+
+[tool.setuptools.package-data]
+dh4pmp = ["templates/**/*"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I", "N"]

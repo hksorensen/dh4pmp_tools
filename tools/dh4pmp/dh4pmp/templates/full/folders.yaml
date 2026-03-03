@@ -1,0 +1,12 @@
+# Mappestruktur for 'full' template
+# Oprettes idempotent – eksisterende mapper røres ikke
+folders:
+  - data/raw
+  - data/cache
+  - pipeline
+  - notebooks/experiments
+  - notebooks/analysis
+  - tests
+  - configs
+  - src/{{ package_name }}
+  - handoff

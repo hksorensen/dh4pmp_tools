@@ -1,0 +1,25 @@
+{
+  "include": ["**/*.py", "**/*.ipynb"],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    "**/.venv",
+    "**/venv",
+    "**/build",
+    "**/dist"
+  ],
+  "extraPaths": [
+    "${workspaceFolder}/src"{% if dh4pmp_extra_paths %},{% endif %}
+    {% for path in dh4pmp_extra_paths -%}
+    "{{ path }}"{{ "," if not loop.last else "" }}
+    {% endfor %}
+  ],
+  "pythonVersion": "{{ python_version }}",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": false,
+  "reportAttributeAccessIssue": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownParameterType": "none"
+}
